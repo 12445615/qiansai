@@ -154,17 +154,6 @@ void PageHome::updateCloudSummary(const QString &dataTime,
                    alarmOverview->text() == QStringLiteral("无") ? QStringLiteral("#98c379") : QStringLiteral("#e06c75"));
 }
 
-void PageHome::updateDeviceOnlineState(bool rkOnline, bool stm32Online)
-{
-    rkOnlineStatus->setText(rkOnline ? QStringLiteral("在线") : QStringLiteral("离线"));
-    stm32OnlineStatus->setText(stm32Online ? QStringLiteral("在线") : QStringLiteral("离线"));
-
-    setPlainStatus(rkOnlineIcon, rkOnlineStatus, rkOnlineStatus->text(),
-                   rkOnline ? QStringLiteral("#98c379") : QStringLiteral("#e06c75"));
-    setPlainStatus(stm32OnlineIcon, stm32OnlineStatus, stm32OnlineStatus->text(),
-                   stm32Online ? QStringLiteral("#98c379") : QStringLiteral("#e06c75"));
-}
-
 void PageHome::applyModuleState(ModuleStateMachine::Module module,
                                 ModuleStateMachine::State state,
                                 const QString &message)
@@ -220,4 +209,14 @@ void PageHome::setPlainStatus(QLabel *icon, QLabel *label,
 {
     label->setText(message);
     icon->setStyleSheet(QStringLiteral("background-color:%1;border-radius:8px;").arg(color));
+}
+
+void PageHome::updateDeviceOnlineState(bool rkOnline, bool stm32Online)
+{
+    rkOnlineStatus->setText(rkOnline ? QStringLiteral("在线") : QStringLiteral("离线"));
+    stm32OnlineStatus->setText(stm32Online ? QStringLiteral("在线") : QStringLiteral("离线"));
+    setPlainStatus(rkOnlineIcon, rkOnlineStatus, rkOnlineStatus->text(),
+                   rkOnline ? QStringLiteral("#98c379") : QStringLiteral("#e06c75"));
+    setPlainStatus(stm32OnlineIcon, stm32OnlineStatus, stm32OnlineStatus->text(),
+                   stm32Online ? QStringLiteral("#98c379") : QStringLiteral("#e06c75"));
 }

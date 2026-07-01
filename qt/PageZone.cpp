@@ -70,7 +70,7 @@ void PageZone::buildUi()
     titleLabel->setAlignment(Qt::AlignCenter);
     titleLabel->setStyleSheet(QStringLiteral("font-size:26px;font-weight:bold;"));
 
-    statusLabel = new QLabel(QStringLiteral("等待启动"), this);
+    statusLabel = new QLabel(QStringLiteral("等待 RK 在线"), this);
     statusLabel->setAlignment(Qt::AlignCenter);
     statusLabel->setStyleSheet(QStringLiteral("font-size:20px;color:#f0c674;"));
 
@@ -79,15 +79,18 @@ void PageZone::buildUi()
     countdownLabel->setStyleSheet(QStringLiteral("font-size:18px;color:#9cdcfe;"));
 
     startButton = new QPushButton(QStringLiteral("开始自动识别"), this);
+    redetectButton = new QPushButton(QStringLiteral("是否重新自动识别"), this);
     yesButton = new QPushButton(QStringLiteral("是"), this);
     noButton = new QPushButton(QStringLiteral("否"), this);
 
     connect(startButton, &QPushButton::clicked, this, &PageZone::onStartAutoDetect);
+    connect(redetectButton, &QPushButton::clicked, this, &PageZone::onForceRedetect);
     connect(yesButton, &QPushButton::clicked, this, &PageZone::onConfirmYes);
     connect(noButton, &QPushButton::clicked, this, &PageZone::onConfirmNo);
 
     QHBoxLayout *buttonRow = new QHBoxLayout();
     buttonRow->addWidget(startButton);
+    buttonRow->addWidget(redetectButton);
     buttonRow->addWidget(yesButton);
     buttonRow->addWidget(noButton);
 
@@ -134,6 +137,18 @@ void PageZone::onStartAutoDetect()
     autoDetectStarted = true;
     manualOverrideActive = false;
     retryCount = 0;
+    startDetectionAttempt();
+}
+
+void PageZone::onForceRedetect()
+{
+    retryTimer->stop();
+    recheckTimer->stop();
+    confirmTimer->stop();
+    autoDetectStarted = true;
+    manualOverrideActive = false;
+    retryCount = 0;
+    publishZoneControl(QStringLiteral("zone_redetect_request"), 0, QStringLiteral("redetect"));
     startDetectionAttempt();
 }
 
@@ -201,6 +216,7 @@ void PageZone::onMqttStateChanged(QMqttClient::ClientState state)
     if (state == QMqttClient::Connected) {
         tryStartAutoDetect();
     }
+    updateUi();
 }
 
 void PageZone::onMqttError(const QString &message)
@@ -243,6 +259,9 @@ void PageZone::emitDeviceStatus()
         && lastRkHeartbeat.secsTo(now) <= kDeviceOfflineTimeoutSeconds;
     const bool stm32Online = lastStm32Heartbeat.isValid()
         && lastStm32Heartbeat.secsTo(now) <= kDeviceOfflineTimeoutSeconds;
+    if (lastRkOnlineState && !rkOnline)
+        resetForRkOffline();
+    lastRkOnlineState = rkOnline;
     emit deviceOnlineChanged(rkOnline, stm32Online);
 }
 
@@ -250,6 +269,7 @@ void PageZone::markRkOnline()
 {
     lastRkHeartbeat = QDateTime::currentDateTime();
     emitDeviceStatus();
+    updateUi();
     tryStartAutoDetect();
 }
 
@@ -262,9 +282,12 @@ void PageZone::markStm32Online()
 void PageZone::updateUi()
 {
     const bool canConfirm = (mode == ZoneMode::AwaitManualConfirm || mode == ZoneMode::ManualConfirmed);
+    const bool rkOnline = lastRkHeartbeat.isValid()
+        && lastRkHeartbeat.secsTo(QDateTime::currentDateTime()) <= kDeviceOfflineTimeoutSeconds;
     yesButton->setEnabled(canConfirm);
     noButton->setEnabled(canConfirm);
     startButton->setEnabled(mode != ZoneMode::AutoDetect);
+    redetectButton->setEnabled(rkOnline && mqttClient->isConnected());
 
     if (mode == ZoneMode::NormalRunning)
         startButton->setText(QStringLiteral("区域已划分正常运行"));
@@ -343,6 +366,19 @@ void PageZone::enterBlocked(const QString &reason)
     resetCountdown();
     updateUi();
     publishZoneControl(QStringLiteral("zone_timeout"), 0, QStringLiteral("blocked"));
+}
+
+void PageZone::resetForRkOffline()
+{
+    retryTimer->stop();
+    recheckTimer->stop();
+    mode = ZoneMode::AutoDetect;
+    retryCount = 0;
+    autoDetectStarted = false;
+    manualOverrideActive = false;
+    resetCountdown();
+    setStatusText(QStringLiteral("等待 RK 在线"));
+    updateUi();
 }
 
 void PageZone::publishZoneControl(const QString &cmd, int enable, const QString &modeText)

@@ -1,0 +1,13 @@
+# qmake/build outputs
+Makefile
+.qmake.stash
+*.o
+moc_*.cpp
+moc_*.o
+moc_predefs.h
+ngnix_client
+
+# editor/system
+.vscode/
+.DS_Store
+Thumbs.db

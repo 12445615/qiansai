@@ -548,6 +548,16 @@ static int video_uploader_handle_one(VideoUploader *uploader) {
         snprintf(error_msg, sizeof(error_msg), "upload callback failed: %d", upload_rc);
     }
 
+    if (upload_rc == ENOENT) {
+        rc = local_store_delete_video_segment(&uploader->store, segment.id);
+        if (rc == 0) {
+            printf("[VideoUploader] Drop missing local segment id=%lld path=%s\n",
+                   (long long)segment.id,
+                   segment.file_path);
+        }
+        return rc;
+    }
+
     rc = local_store_mark_video_segment_retry(&uploader->store, segment.id, error_msg);
     if (rc == 0) {
         printf("[VideoUploader] Upload failed, segment id=%lld retry=%d, error=%s\n",

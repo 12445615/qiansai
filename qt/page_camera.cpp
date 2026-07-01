@@ -120,6 +120,13 @@ void PageCamera::videoLayout()
     playbackDateCombo = new QComboBox(this);
     playbackRefreshBtn = new QPushButton(QStringLiteral("刷新"), this);
     playbackPlayBtn = new QPushButton(QStringLiteral("播放选中片段"), this);
+    playbackSpeedCombo = new QComboBox(this);
+    playbackSpeedCombo->addItem(QStringLiteral("1x"), 1.0);
+    playbackSpeedCombo->addItem(QStringLiteral("2x"), 2.0);
+    playbackPositionLabel = new QLabel(QStringLiteral("00:00"), this);
+    playbackDurationLabel = new QLabel(QStringLiteral("/00:00"), this);
+    playbackDurationSlider = new QSlider(Qt::Horizontal, this);
+    playbackDurationSlider->setRange(0, 0);
 
     durationSlider = new QSlider(Qt::Horizontal);
 
@@ -200,6 +207,8 @@ void PageCamera::videoLayout()
     playbackToolLayout->addWidget(playbackDateCombo);
     playbackToolLayout->addWidget(playbackRefreshBtn);
     playbackToolLayout->addWidget(playbackPlayBtn);
+    playbackToolLayout->addWidget(new QLabel(QStringLiteral("倍速:"), playbackPage));
+    playbackToolLayout->addWidget(playbackSpeedCombo);
     playbackToolLayout->addStretch();
     QHBoxLayout *playbackContentLayout = new QHBoxLayout();
     playbackContentLayout->addWidget(playbackVideoLabel, 3);
@@ -209,6 +218,11 @@ void PageCamera::videoLayout()
     playbackLayout->addWidget(playbackTitle);
     playbackLayout->addLayout(playbackToolLayout);
     playbackLayout->addLayout(playbackContentLayout, 1);
+    QHBoxLayout *playbackProgressLayout = new QHBoxLayout();
+    playbackProgressLayout->addWidget(playbackPositionLabel);
+    playbackProgressLayout->addWidget(playbackDurationSlider, 1);
+    playbackProgressLayout->addWidget(playbackDurationLabel);
+    playbackLayout->addLayout(playbackProgressLayout);
 
     cameraStack = new QStackedWidget(this);
     cameraStack->addWidget(livePage);
@@ -240,6 +254,14 @@ void PageCamera::videoLayout()
             this, &PageCamera::scanVideoFiles);
     connect(playbackPlayBtn, &QPushButton::clicked,
             this, &PageCamera::playSelectedPlaybackSegment);
+    connect(playbackDurationSlider, &QSlider::sliderReleased, this, [this](){
+        if(playbackVideoThread)
+            playbackVideoThread->seekToMs(static_cast<qint64>(playbackDurationSlider->value()) * 1000);
+    });
+    connect(playbackSpeedCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){
+        if(playbackVideoThread)
+            playbackVideoThread->setPlaybackRate(playbackSpeedCombo->currentData().toDouble());
+    });
 }
 
 void PageCamera::scanVideoFiles()
@@ -351,6 +373,9 @@ void PageCamera::playSelectedPlaybackSegment()
     }
 
     cameraStack->setCurrentWidget(playbackPage);
+    playbackDurationSlider->setValue(0);
+    playbackPositionLabel->setText(QStringLiteral("00:00"));
+    playbackDurationLabel->setText(QStringLiteral("/00:00"));
     startVideoPlayback(playbackVideoThread,
                        mediaObjectInfo.at(currentIndex).filePath,
                        playbackVideoLabel,
@@ -409,6 +434,33 @@ void PageCamera::startVideoPlayback(XVideoThread *&thread,
                         Qt::SmoothTransformation));
             },
             Qt::QueuedConnection);
+
+    if(logPrefix == QStringLiteral("回放")){
+        thread->setPlaybackRate(playbackSpeedCombo->currentData().toDouble());
+        auto formatMs = [](qint64 ms) {
+            qint64 totalSec = qMax<qint64>(0, ms / 1000);
+            qint64 min = totalSec / 60;
+            qint64 sec = totalSec % 60;
+            return QStringLiteral("%1:%2")
+                .arg(min, 2, 10, QChar('0'))
+                .arg(sec, 2, 10, QChar('0'));
+        };
+        connect(thread, &XVideoThread::sig_durationChanged,
+                this,
+                [this, formatMs](qint64 durationMs){
+                    playbackDurationSlider->setRange(0, static_cast<int>(qMax<qint64>(0, durationMs / 1000)));
+                    playbackDurationLabel->setText(QStringLiteral("/%1").arg(formatMs(durationMs)));
+                },
+                Qt::QueuedConnection);
+        connect(thread, &XVideoThread::sig_positionChanged,
+                this,
+                [this, formatMs](qint64 positionMs){
+                    if(!playbackDurationSlider->isSliderDown())
+                        playbackDurationSlider->setValue(static_cast<int>(qMax<qint64>(0, positionMs / 1000)));
+                    playbackPositionLabel->setText(formatMs(positionMs));
+                },
+                Qt::QueuedConnection);
+    }
 
     thread->start();
     fprintf(stderr, "[VIDEO][ui] %s thread started=%p\n",

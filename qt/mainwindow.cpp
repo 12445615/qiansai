@@ -84,6 +84,12 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(sensor, &PageSensor::homeSummaryUpdated,
             home, &PageHome::updateCloudSummary);
+    connect(sharedMqttClient, &AliyunMqttClient::sensorDataReceived,
+            this, [this](const AliyunSensorData &data){
+                if (data.hasFire) {
+                    resourcemanager->updateAI(static_cast<float>(data.fireConfidence), 0.0f, 0.0f);
+                }
+            });
     connect(zonePage, &PageZone::deviceOnlineChanged,
             home, &PageHome::updateDeviceOnlineState);
 

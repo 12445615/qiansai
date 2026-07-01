@@ -1,0 +1,16 @@
+<RCC>
+    <qresource prefix="/pages">
+        <file>page_camera.cpp</file>
+        <file>page_camera.h</file>
+        <file>page_home.h</file>
+        <file>pagehome.cpp</file>
+    </qresource>
+    <qresource prefix="/network">
+        <file>httpclient.cpp</file>
+        <file>httpclient.h</file>
+    </qresource>
+    <qresource prefix="/thread">
+        <file>worker.cpp</file>
+        <file>worker.h</file>
+    </qresource>
+</RCC>

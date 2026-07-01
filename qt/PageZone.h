@@ -22,6 +22,7 @@ signals:
 
 private slots:
     void onStartAutoDetect();
+    void onForceRedetect();
     void onConfirmYes();
     void onConfirmNo();
     void onRetryTimeout();
@@ -53,6 +54,7 @@ private:
     void enterAwaitManualConfirm();
     void enterNormalRunning();
     void enterBlocked(const QString &reason);
+    void resetForRkOffline();
     void publishZoneControl(const QString &cmd, int enable, const QString &mode);
     void configureMqtt();
     void bindMqttSignals();
@@ -63,6 +65,7 @@ private:
     QLabel *statusLabel = nullptr;
     QLabel *countdownLabel = nullptr;
     QPushButton *startButton = nullptr;
+    QPushButton *redetectButton = nullptr;
     QPushButton *yesButton = nullptr;
     QPushButton *noButton = nullptr;
 
@@ -80,6 +83,7 @@ private:
     bool ownsMqttClient = false;
     bool autoDetectStarted = false;
     bool manualOverrideActive = false;
+    bool lastRkOnlineState = false;
 };
 
 #endif // PAGEZONE_H

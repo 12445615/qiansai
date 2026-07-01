@@ -85,6 +85,7 @@
 #define SAFETY_AI_FLAG_NO_VEST     (1u << 3)
 #define SAFETY_AI_FLAG_FIRE        (1u << 4)
 #define SAFETY_AI_FLAG_FIRE_OUT    (1u << 5)
+#define SAFETY_RESET_FIRE_IGNORE_MS 5000
 #define SAFETY_AI_FLAG_INTRUSION   (1u << 6)
 #define SAFETY_AI_FLAG_ZONE1_BUSY  (1u << 7)
 #define SAFETY_AI_FLAG_PERSON      (1u << 8)
@@ -737,6 +738,7 @@ typedef struct {
     int64_t ppe_first_seen_ms;
     int64_t intrusion_first_seen_ms;
     int64_t sensor_baseline_ms;
+    int64_t fire_env_confirm_until_ms;
     uint16_t baseline_smoke;
     int16_t baseline_temperature_x10;
     int fire_locked;
@@ -745,6 +747,7 @@ typedef struct {
     int fault_locked;
     int suppress_fusion_send;
     int manual_reset_override;
+    int64_t fire_ignore_until_ms;
     uint16_t last_reset_ok_event_id;
     int zone1_power_enabled;
     int zone2_power_enabled;
@@ -939,6 +942,21 @@ static uint8_t safety_zone_power_action(const SafetyRuntimeState *state, int ala
     return alarm ? SAFETY_STM32_ACTION_KEEP_POWER_OFF : SAFETY_STM32_ACTION_STANDBY_POWER_OFF;
 }
 
+static void safety_update_sensor_baseline(SafetyRuntimeState *state,
+                                          const SafetyStm32Snapshot *stm32,
+                                          int64_t frame_mono_ms) {
+    if (state == NULL || stm32 == NULL || !stm32->online) {
+        return;
+    }
+
+    if (state->sensor_baseline_ms == 0 ||
+        frame_mono_ms - state->sensor_baseline_ms > SAFETY_CONFIRM_DELAY_MS) {
+        state->sensor_baseline_ms = frame_mono_ms;
+        state->baseline_smoke = stm32->smoke;
+        state->baseline_temperature_x10 = stm32->temperature_x10;
+    }
+}
+
 static int safety_sensor_rise_high(SafetyRuntimeState *state,
                                    const SafetyStm32Snapshot *stm32,
                                    int64_t frame_mono_ms) {
@@ -949,11 +967,8 @@ static int safety_sensor_rise_high(SafetyRuntimeState *state,
         return 0;
     }
 
-    if (state->sensor_baseline_ms == 0 ||
-        frame_mono_ms - state->sensor_baseline_ms > SAFETY_CONFIRM_DELAY_MS) {
-        state->sensor_baseline_ms = frame_mono_ms;
-        state->baseline_smoke = stm32->smoke;
-        state->baseline_temperature_x10 = stm32->temperature_x10;
+    if (state->sensor_baseline_ms == 0) {
+        safety_update_sensor_baseline(state, stm32, frame_mono_ms);
         return 0;
     }
 
@@ -997,6 +1012,14 @@ static void safety_evaluate_fusion(SafetyRuntimeState *state,
     int zone_detected = zone_runtime_get_detected(NULL, NULL);
     int zone_blocked = mqtt_get_zone_blocked();
     int zone_confirm_enabled = mqtt_get_zone_confirm_enabled();
+    int env_abs_high = stm32_online &&
+                       (stm32->smoke >= (uint16_t)smoke_high ||
+                        stm32->gas >= (uint16_t)gas_high ||
+                        stm32->temperature_x10 >= temp_high_x10);
+
+    if (state != NULL && env_abs_high) {
+        state->fire_env_confirm_until_ms = frame_mono_ms + 8000;
+    }
 
     *permit_decision = SAFETY_PERMIT_DENY;
     *risk_level = SAFETY_RISK_WARNING;
@@ -1023,10 +1046,13 @@ static void safety_evaluate_fusion(SafetyRuntimeState *state,
         state->last_stm32_action = 0xFF;
         state->last_explain_code = 0xFF;
         state->manual_reset_override = 1;
+        state->fire_ignore_until_ms = frame_mono_ms + SAFETY_RESET_FIRE_IGNORE_MS;
+        state->fire_env_confirm_until_ms = 0;
         state->last_reset_ok_event_id = stm32->last_event_id;
-        state->zone1_power_enabled = 0;
-        state->zone2_power_enabled = 0;
-        printf("[Safety] STM32 reset OK event=%u: enter manual reset override\n", stm32->last_event_id);
+        state->zone1_power_enabled = 1;
+        state->zone2_power_enabled = 1;
+        printf("[Safety] STM32 reset OK event=%u: ignore fire for %d ms\n",
+               stm32->last_event_id, SAFETY_RESET_FIRE_IGNORE_MS);
         *permit_decision = SAFETY_PERMIT_ALLOW;
         *risk_level = SAFETY_RISK_SAFE;
         *risk_type = SAFETY_RISK_TYPE_NONE;
@@ -1034,6 +1060,24 @@ static void safety_evaluate_fusion(SafetyRuntimeState *state,
         *stm32_action = safety_zone_power_action(state, 0);
         *explain_code = 88;
         return;
+    }
+
+    if (state != NULL && state->fire_ignore_until_ms > 0) {
+        if (frame_mono_ms < state->fire_ignore_until_ms) {
+            if (ai_flags & (SAFETY_AI_FLAG_FIRE | SAFETY_AI_FLAG_FIRE_OUT)) {
+                ai_flags &= (uint16_t)~(SAFETY_AI_FLAG_FIRE | SAFETY_AI_FLAG_FIRE_OUT);
+                state->fire_locked = 0;
+                state->fire_lock_sent = 0;
+                printf("[Safety] reset fire ignore active: %lld ms left\n",
+                       (long long)(state->fire_ignore_until_ms - frame_mono_ms));
+            }
+        } else {
+            state->fire_ignore_until_ms = 0;
+        }
+    }
+
+    if ((ai_flags & (SAFETY_AI_FLAG_FIRE | SAFETY_AI_FLAG_FIRE_OUT)) == 0) {
+        safety_update_sensor_baseline(state, stm32, frame_mono_ms);
     }
 
     if (state != NULL && state->manual_reset_override) {
@@ -1131,7 +1175,23 @@ static void safety_evaluate_fusion(SafetyRuntimeState *state,
         return;
     }
 
-    if (stm32_online && stm32->smoke >= (uint16_t)smoke_high) {
+    if (ai_flags & (SAFETY_AI_FLAG_FIRE | SAFETY_AI_FLAG_FIRE_OUT)) {
+        if (safety_sensor_rise_high(state, stm32, frame_mono_ms) ||
+            env_abs_high ||
+            (state != NULL && state->fire_env_confirm_until_ms > frame_mono_ms)) {
+            if (state != NULL) {
+                state->fire_locked = 1;
+            }
+            *risk_level = SAFETY_RISK_CRITICAL;
+            *risk_type = SAFETY_RISK_TYPE_FIRE;
+            *voice_action = SAFETY_VOICE_FIRE_WARNING;
+            *stm32_action = SAFETY_STM32_ACTION_CUT_POWER_FAN_ALARM;
+            *explain_code = 42;
+            return;
+        }
+    }
+
+    if (0 && stm32_online && stm32->smoke >= (uint16_t)smoke_high) {
         *risk_level = SAFETY_RISK_CRITICAL;
         *risk_type = SAFETY_RISK_TYPE_ENV;
         *voice_action = SAFETY_VOICE_ENV_WARNING;
@@ -1139,7 +1199,7 @@ static void safety_evaluate_fusion(SafetyRuntimeState *state,
         *explain_code = 61;
         return;
     }
-    if (stm32_online && stm32->gas >= (uint16_t)gas_high) {
+    if (0 && stm32_online && stm32->gas >= (uint16_t)gas_high) {
         *risk_level = SAFETY_RISK_CRITICAL;
         *risk_type = SAFETY_RISK_TYPE_ENV;
         *voice_action = SAFETY_VOICE_ENV_WARNING;
@@ -1147,7 +1207,7 @@ static void safety_evaluate_fusion(SafetyRuntimeState *state,
         *explain_code = 62;
         return;
     }
-    if (stm32_online && stm32->temperature_x10 >= temp_high_x10) {
+    if (0 && stm32_online && stm32->temperature_x10 >= temp_high_x10) {
         *risk_level = SAFETY_RISK_CRITICAL;
         *risk_type = SAFETY_RISK_TYPE_ENV;
         *voice_action = SAFETY_VOICE_ENV_WARNING;
@@ -1182,27 +1242,27 @@ static void safety_evaluate_fusion(SafetyRuntimeState *state,
     }
 
 
-    if (ai_flags & SAFETY_AI_FLAG_FIRE_OUT) {
-        if (state != NULL) {
-            state->fire_locked = 1;
+    if (ai_flags & (SAFETY_AI_FLAG_FIRE | SAFETY_AI_FLAG_FIRE_OUT)) {
+        if (safety_sensor_rise_high(state, stm32, frame_mono_ms) ||
+            env_abs_high ||
+            (state != NULL && state->fire_env_confirm_until_ms > frame_mono_ms)) {
+            if (state != NULL) {
+                state->fire_locked = 1;
+            }
+            *risk_level = SAFETY_RISK_CRITICAL;
+            *risk_type = SAFETY_RISK_TYPE_FIRE;
+            *voice_action = SAFETY_VOICE_FIRE_WARNING;
+            *stm32_action = SAFETY_STM32_ACTION_CUT_POWER_FAN_ALARM;
+            *explain_code = 42;
+            return;
         }
-        *risk_level = SAFETY_RISK_CRITICAL;
-        *risk_type = SAFETY_RISK_TYPE_FIRE;
-        *voice_action = SAFETY_VOICE_FIRE_WARNING;
-        *stm32_action = SAFETY_STM32_ACTION_CUT_POWER_FAN_ALARM;
-        *explain_code = 42;
-        return;
-    }
 
-    if (ai_flags & SAFETY_AI_FLAG_FIRE) {
-        if (state != NULL) {
-            state->fire_locked = 1;
-        }
-        *risk_level = SAFETY_RISK_CRITICAL;
-        *risk_type = SAFETY_RISK_TYPE_FIRE;
-        *voice_action = SAFETY_VOICE_FIRE_WARNING;
-        *stm32_action = SAFETY_STM32_ACTION_CUT_POWER_FAN_ALARM;
-        *explain_code = 42;
+        *permit_decision = SAFETY_PERMIT_ALLOW;
+        *risk_level = SAFETY_RISK_SAFE;
+        *risk_type = SAFETY_RISK_TYPE_NONE;
+        *voice_action = SAFETY_VOICE_NONE;
+        *stm32_action = safety_zone_power_action(state, 0);
+        *explain_code = 43;
         return;
     }
 

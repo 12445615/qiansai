@@ -1,4 +1,4 @@
-﻿#include "page_sensor.h"
+#include "page_sensor.h"
 
 #include <QDateTime>
 #include <QFrame>
@@ -9,16 +9,17 @@ constexpr double kSmokeAlarmThreshold = 70.0;
 constexpr double kCombustibleGasAlarmThreshold = 3000.0;
 }
 
-PageSensor::PageSensor(QWidget *parent)
+PageSensor::PageSensor(AliyunMqttClient *sharedClient, QWidget *parent)
     : QWidget(parent),
       mqttStatusLabel(new QLabel(QStringLiteral("MQTT: 未配置"), this)),
       tempValue(new QLabel(QStringLiteral("-- ℃"), this)),
       alarmStateValue(new QLabel(QStringLiteral("--"), this)),
       smokeValue(new QLabel(QStringLiteral("--"), this)),
       combustible_gasValue(new QLabel(QStringLiteral("--"), this)),
-      powerStateValue(new QLabel(QStringLiteral("--"), this)),
+      power1StateValue(new QLabel(QStringLiteral("--"), this)),
+      power2StateValue(new QLabel(QStringLiteral("--"), this)),
       aiDetectStateValue(new QLabel(QStringLiteral("无目标"), this)),
-      mqttClient(new AliyunMqttClient(this)),
+      mqttClient(sharedClient ? sharedClient : new AliyunMqttClient(this)),
       mqttReconnectTimer(new QTimer(this))
 {
     setStyleSheet(QStringLiteral("background-color:#1e1e2f;color:white;"));
@@ -34,7 +35,8 @@ PageSensor::PageSensor(QWidget *parent)
         tempValue,
         alarmStateValue,
         smokeValue,
-        powerStateValue,
+        power1StateValue,
+        power2StateValue,
         combustible_gasValue,
         aiDetectStateValue
     };
@@ -69,7 +71,8 @@ PageSensor::PageSensor(QWidget *parent)
     grid->addWidget(createCard(QStringLiteral("烟雾浓度"), smokeValue), 1, 0);
     grid->addWidget(createCard(QStringLiteral("AI状态"), aiDetectStateValue), 1, 1);
     grid->addWidget(createCard(QStringLiteral("可燃气体检测"), combustible_gasValue), 2, 0);
-    grid->addWidget(createCard(QStringLiteral("电源状态"), powerStateValue), 2, 1);
+    grid->addWidget(createCard(QStringLiteral("工作区1电源"), power1StateValue), 2, 1);
+    grid->addWidget(createCard(QStringLiteral("工作区2电源"), power2StateValue), 3, 0);
 
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->addWidget(title);
@@ -81,14 +84,13 @@ PageSensor::PageSensor(QWidget *parent)
     connect(mqttReconnectTimer, &QTimer::timeout,
             this, &PageSensor::reconnectMqttIfNeeded);
 
-    connect(mqttClient, &AliyunMqttClient::sensorDataReceived,
-            this, &PageSensor::applySensorData);
-    connect(mqttClient, &AliyunMqttClient::stateChanged,
-            this, &PageSensor::updateMqttState);
-    connect(mqttClient, &AliyunMqttClient::errorOccurred,
-            this, &PageSensor::showMqttError);
+    ownsMqttClient = (sharedClient == nullptr);
+    bindMqttSignals();
 
-    initMqttClient();
+    if (ownsMqttClient)
+        initMqttClient();
+    else
+        updateMqttState(mqttClient->state());
 }
 
 void PageSensor::applySensorData(const AliyunSensorData &data)
@@ -108,8 +110,17 @@ void PageSensor::applySensorData(const AliyunSensorData &data)
     if (data.hasAlarmState)
         alarmStateValue->setText(alarmStateText(data.alarmState));
 
-    if (data.hasPowerSwitch)
-        powerStateValue->setText(powerSwitchText(data.powerSwitch));
+    if (data.hasPowerSwitch1) {
+        power1StateValue->setText(powerSwitchText(data.powerSwitch1));
+    } else if (data.hasPowerSwitch) {
+        power1StateValue->setText(powerSwitchText(data.powerSwitch));
+    }
+
+    if (data.hasPowerSwitch2) {
+        power2StateValue->setText(powerSwitchText(data.powerSwitch2));
+    } else if (data.hasPowerSwitch) {
+        power2StateValue->setText(powerSwitchText(data.powerSwitch));
+    }
 
     QStringList environmentWarnings;
     if (data.hasSmoke && data.smoke >= kSmokeAlarmThreshold)
@@ -126,13 +137,21 @@ void PageSensor::applySensorData(const AliyunSensorData &data)
         ? QStringLiteral("正常")
         : environmentWarnings.join(QStringLiteral("、"));
 
+    const bool aiFireState = data.hasAiDetectState
+        && (data.aiDetectState == 5 || data.aiDetectState == 6);
+    const bool fireAlarm = aiFireState
+        || (data.hasFire && data.fireConfidence > 0.0);
+
     QString recentAlarm = QStringLiteral("无");
-    if (data.hasAiDetectState && data.aiDetectState != 0) {
+    if (data.hasFire && data.fireConfidence > 0.0) {
+        recentAlarm = QStringLiteral("火灾报警 %1%")
+            .arg(qBound(0, static_cast<int>(data.fireConfidence + 0.5), 100));
+    } else if (aiFireState) {
+        recentAlarm = QStringLiteral("火灾报警（待复位）");
+    } else if (data.hasAiDetectState && data.aiDetectState != 0) {
         recentAlarm = aiText;
     } else if (!environmentWarnings.isEmpty()) {
         recentAlarm = environmentText;
-    } else if (data.hasFire && data.fireDetected) {
-        recentAlarm = QStringLiteral("火焰报警");
     } else if (data.hasAlarmState && data.alarmState != 0) {
         recentAlarm = QStringLiteral("设备报警");
     }
@@ -140,7 +159,7 @@ void PageSensor::applySensorData(const AliyunSensorData &data)
     const bool alarm = (data.hasAlarmState && data.alarmState != 0)
         || (data.hasAiDetectState && data.aiDetectState != 0)
         || !environmentWarnings.isEmpty()
-        || (data.hasFire && data.fireDetected);
+        || fireAlarm;
     const QString systemSafety = alarm ? QStringLiteral("报警") : QStringLiteral("正常");
 
     emit homeSummaryUpdated(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
@@ -161,14 +180,10 @@ void PageSensor::updateMqttState(QMqttClient::ClientState state)
     case QMqttClient::Disconnected:
         updateStatusLabel(QStringLiteral("MQTT: 已断开"), QStringLiteral("#e06c75"));
         emit sensorConnectionStateChanged(false, QStringLiteral("已断开"));
-        if (!mqttReconnectTimer->isActive())
-            mqttReconnectTimer->start();
         break;
     case QMqttClient::Connecting:
         updateStatusLabel(QStringLiteral("MQTT: 连接中"), QStringLiteral("#f0c674"));
         emit sensorConnectionStateChanged(false, QStringLiteral("连接中"));
-        if (!mqttReconnectTimer->isActive())
-            mqttReconnectTimer->start();
         break;
     case QMqttClient::Connected:
         updateStatusLabel(QStringLiteral("MQTT: 已连接"), QStringLiteral("#98c379"));
@@ -182,8 +197,6 @@ void PageSensor::showMqttError(const QString &message)
 {
     updateStatusLabel(QStringLiteral("MQTT: %1").arg(message), QStringLiteral("#e06c75"));
     emit sensorConnectionStateChanged(false, message);
-    if (mqttClient->state() != QMqttClient::Connected && !mqttReconnectTimer->isActive())
-        mqttReconnectTimer->start();
 }
 
 void PageSensor::reconnectMqttIfNeeded()
@@ -199,6 +212,16 @@ void PageSensor::reconnectMqttIfNeeded()
     updateStatusLabel(QStringLiteral("MQTT: 正在自动重连"), QStringLiteral("#f0c674"));
     emit sensorConnectionStateChanged(false, QStringLiteral("正在自动重连"));
     mqttClient->connectToAliyun();
+}
+
+void PageSensor::bindMqttSignals()
+{
+    connect(mqttClient, &AliyunMqttClient::sensorDataReceived,
+            this, &PageSensor::applySensorData);
+    connect(mqttClient, &AliyunMqttClient::stateChanged,
+            this, &PageSensor::updateMqttState);
+    connect(mqttClient, &AliyunMqttClient::errorOccurred,
+            this, &PageSensor::showMqttError);
 }
 
 void PageSensor::initMqttClient()

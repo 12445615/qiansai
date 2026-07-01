@@ -125,11 +125,12 @@ void AliyunMqttClient::connectToAliyun()
     if(!validateConfig())
         return;
 
+    if (m_client->state() == QMqttClient::Connected
+        || m_client->state() == QMqttClient::Connecting)
+        return;
+
     m_manualDisconnect = false;
     m_reconnectTimer->stop();
-
-    if(m_client->state() != QMqttClient::Disconnected)
-        m_client->disconnectFromHost();
 
     applyConnectionOptions();
     const bool useTls = (m_config.port == 8883);
@@ -489,14 +490,29 @@ bool AliyunMqttClient::parseSensorData(const QJsonObject &root, AliyunSensorData
     readNumber({QStringLiteral("CombustibleGasCheck")},
                &data->hasCombustibleGas,&data->combustibleGas);
 
-    readBool({QStringLiteral("fire"),QStringLiteral("fireDetected"),QStringLiteral("flame")},
-             &data->hasFire,&data->fireDetected);
+    readNumber({QStringLiteral("fire"), QStringLiteral("Fire"), QStringLiteral("fireConfidence")},
+               &data->hasFire, &data->fireConfidence);
+    if (data->hasFire) {
+        data->fireDetected = data->fireConfidence > 0.0;
+    } else {
+        readBool({QStringLiteral("fireDetected"),QStringLiteral("flame")},
+                 &data->hasFire,&data->fireDetected);
+        data->fireConfidence = data->fireDetected ? 100.0 : 0.0;
+    }
     readBool({QStringLiteral("combustibleGas"),QStringLiteral("combustible_gas"),QStringLiteral("gas")},
              &data->hasCombustibleGas,&data->combustibleGasDetected);
     readInt({QStringLiteral("AiDetectState")},
             &data->hasAiDetectState,&data->aiDetectState);
     readInt({QStringLiteral("PowerSwitch")},
             &data->hasPowerSwitch,&data->powerSwitch);
+    readInt({QStringLiteral("PowerSwitch1")},
+            &data->hasPowerSwitch1,&data->powerSwitch1);
+    readInt({QStringLiteral("PowerSwitch2")},
+            &data->hasPowerSwitch2,&data->powerSwitch2);
+    if (!data->hasPowerSwitch && (data->hasPowerSwitch1 || data->hasPowerSwitch2)) {
+        data->hasPowerSwitch = true;
+        data->powerSwitch = (data->powerSwitch1 != 0 && data->powerSwitch2 != 0) ? 1 : 0;
+    }
     readInt({QStringLiteral("AlarmState")},
             &data->hasAlarmState,&data->alarmState);
 
