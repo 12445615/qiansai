@@ -1,0 +1,11 @@
+*.o
+*.obj
+*.axf
+*.elf
+*.map
+*.log
+*.tmp
+build/
+**/build/
+.DS_Store
+Thumbs.db

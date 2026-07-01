@@ -1,0 +1,11 @@
+[Unit]
+Description=Auto Connect WiFi on Boot
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/wifi_auto_connect.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
