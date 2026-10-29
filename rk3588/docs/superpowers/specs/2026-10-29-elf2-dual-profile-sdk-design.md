@@ -90,7 +90,16 @@ sysroot 组装脚本必须可重复执行。重复运行相同输入应生成相
 
 ## 6. 最小 FFmpeg 6 + MPP
 
-现有 `libavcodec.so.60` 虽包含 `h264_rkmpp`，但没有开发头文件，并依赖大量无关第三方库，不能直接作为开发环境。`jammy-deploy` 将从已校验的 FFmpeg 6.0 源码重新构建最小共享库集合。
+现有 `libavcodec.so.60` 虽包含 `h264_rkmpp`，但没有开发头文件，并依赖大量无关第三方库，不能直接作为开发环境。二进制内记录的版本为 `6.0.1-1+git20240229.99d938d6~jammy`；进一步核对确认，RKMPP 编码器来自 `nyanmisaka/ffmpeg-rockchip`，而不是上游 FFmpeg 6.0。上游 6.0 归档只有 RKMPP 解码实现，不能作为本项目硬件编码构建源。
+
+`jammy-deploy` 固定使用以下源码版本重新构建最小共享库集合：
+
+```text
+repository: https://github.com/nyanmisaka/ffmpeg-rockchip.git
+commit:     99d938d6ea32c31457bb68a5a2177c94d13a4854
+```
+
+源码必须按完整提交 SHA 获取并记录归档 SHA-256。现有上游 `ffmpeg-6.0.tar.xz` 仅保留为来源证据和差异参考，不进入部署构建。
 
 保留能力：
 
