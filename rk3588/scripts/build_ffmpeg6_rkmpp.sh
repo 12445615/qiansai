@@ -85,7 +85,7 @@ if ((print_only)); then
 fi
 
 elf2_require_dir "$sysroot"
-elf2_require_file "$cross_prefix"gcc
+elf2_require_file "${cross_prefix}gcc"
 mkdir -p "$(dirname "$source_cache")"
 if [[ ! -f "$source_cache" ]]; then
     curl -L --fail --retry 3 -o "$source_cache" "$source_url"

@@ -30,12 +30,22 @@ PAHO_LIB := $(call find_lib,libpaho-mqtt3c.so)
 MODBUS_LIB := $(call find_lib,libmodbus.so)
 MPP_LIB := $(call find_lib,librockchip_mpp.so)
 FFMPEG_ABI := $(shell if test -r "$(SYSROOT_INC)/libavcodec/version_major.h"; then sed -n 's/^#define LIBAVCODEC_VERSION_MAJOR[[:space:]]*//p' "$(SYSROOT_INC)/libavcodec/version_major.h"; fi)
+FFMPEG_MANIFEST := $(SYSROOT)/manifests/ffmpeg-rockchip.txt
+FFMPEG_COMPONENTS := $(SYSROOT)/manifests/ffmpeg-rockchip-components.txt
+FFMPEG_SONAME_OK := $(shell if test -n "$(AVCODEC_LIB)" && readelf -d "$(AVCODEC_LIB)" 2>/dev/null | grep -Eq 'SONAME[^]]*libavcodec.so.60'; then echo yes; else echo no; fi)
 
 PAHO_MQTT := $(if $(and $(wildcard $(SYSROOT_INC)/MQTTClient.h),$(PAHO_LIB)),enabled,disabled)
 LIBMODBUS := $(if $(and $(wildcard $(SYSROOT_INC)/modbus/modbus.h),$(MODBUS_LIB)),enabled,disabled)
-RKMPP_ENCODER := $(shell if test -n "$(AVCODEC_LIB)" -a -r "$(AVCODEC_LIB)"; then if strings "$(AVCODEC_LIB)" 2>/dev/null | grep -q h264_rkmpp; then echo available; else echo unavailable; fi; else echo unknown; fi)
+RKMPP_ENCODER := $(shell \
+    if test -n "$(AVCODEC_LIB)" && test "$(FFMPEG_ABI)" = 60 && test "$(FFMPEG_SONAME_OK)" = yes \
+       && grep -Fxq 'COMMIT=99d938d6ea32c31457bb68a5a2177c94d13a4854' "$(FFMPEG_MANIFEST)" \
+       && grep -Fxq 'CONFIG_H264_RKMPP_ENCODER=1' "$(FFMPEG_COMPONENTS)" \
+       && grep -Fxq 'CONFIG_AAC_ENCODER=1' "$(FFMPEG_COMPONENTS)"; then echo available; \
+    elif test -n "$(AVCODEC_LIB)"; then echo unavailable; else echo unknown; fi)
 
 CPPFLAGS := -I$(SYSROOT_INC) \
+            -I$(SYSROOT)/usr/local/include \
+            -I$(SYSROOT)/usr/local/include/rockchip \
             -I$(SYSROOT_INC)/rknn \
             -I$(SYSROOT_INC)/rga \
             -I$(SYSROOT_INC)/freetype2 \
@@ -46,8 +56,12 @@ CFLAGS := -Wall -Wextra -O2 -g -MMD -MP -DDISABLE_LIBJPEG
 CXXFLAGS := $(CFLAGS) -std=c++11
 
 LDFLAGS := --sysroot=$(SYSROOT) \
-           $(foreach libdir,$(LIB_SEARCH_DIRS),-L$(libdir) -Wl,-rpath-link,$(libdir)) \
-           -Wl,--allow-shlib-undefined
+           $(foreach libdir,$(LIB_SEARCH_DIRS),-L$(libdir) -Wl,-rpath-link,$(libdir))
+ifeq ($(PROFILE_STRICT),1)
+LDFLAGS += -Wl,--no-allow-shlib-undefined
+else
+LDFLAGS += -Wl,--allow-shlib-undefined
+endif
 LDLIBS := -lavformat -lavcodec -lswresample -lavutil \
           -lcurl -lsqlite3 -ldrm -lrga -lrknnrt -lfreetype \
           -lm -lpthread -ldl
@@ -61,6 +75,11 @@ endif
 
 ifeq ($(LIBMODBUS),enabled)
 LDLIBS += -lmodbus
+endif
+
+ifeq ($(MPP_LIB),)
+else
+LDLIBS += -lrockchip_mpp
 endif
 
 .DEFAULT_GOAL := all
@@ -85,10 +104,20 @@ check-env:
 	@test -n "$(RKNN_LIB)" -a -f "$(RKNN_LIB)" || { echo "error: RKNN runtime library missing from ELF2 sysroot" >&2; exit 1; }
 	@test -f "$(SYSROOT_INC)/rga/im2d.h" || { echo "error: RGA header missing from ELF2 sysroot" >&2; exit 1; }
 	@test -n "$(RGA_LIB)" -a -f "$(RGA_LIB)" || { echo "error: RGA runtime library missing from ELF2 sysroot" >&2; exit 1; }
+	@if test "$(PROFILE_STRICT)" = 1; then \
+		test "$(PAHO_MQTT)" = enabled || { echo "error: Paho MQTT C is required for jammy-deploy" >&2; exit 1; }; \
+		test "$(LIBMODBUS)" = enabled || { echo "error: libmodbus is required for jammy-deploy" >&2; exit 1; }; \
+		test -n "$(MPP_LIB)" || { echo "error: RKMPP runtime library is required for jammy-deploy" >&2; exit 1; }; \
+		test -n "$(RKNN_LIB)" || { echo "error: RKNN runtime library is required for jammy-deploy" >&2; exit 1; }; \
+		test -n "$(RGA_LIB)" || { echo "error: RGA runtime library is required for jammy-deploy" >&2; exit 1; }; \
+		test "$(FFMPEG_ABI)" = 60 || { echo "error: FFmpeg ABI 60 is required for jammy-deploy" >&2; exit 1; }; \
+		test "$(RKMPP_ENCODER)" = available || { echo "error: h264_rkmpp_encoder evidence is missing for jammy-deploy" >&2; exit 1; }; \
+	else \
+		test "$(PAHO_MQTT)" = enabled || echo "warning: Paho MQTT C is unavailable; MQTT code will use its ENOSYS fallback" >&2; \
+		test "$(LIBMODBUS)" = enabled || echo "warning: libmodbus is unavailable; Modbus code will use its ENOSYS fallback" >&2; \
+		test "$(RKMPP_ENCODER)" = available || echo "warning: this sysroot does not expose the h264_rkmpp FFmpeg encoder; use the board/Jammy sysroot for deployment" >&2; \
+	fi
 	@echo "ELF2 SDK environment OK"
-	@if test "$(PAHO_MQTT)" != enabled; then echo "warning: Paho MQTT C is unavailable; MQTT code will use its ENOSYS fallback" >&2; fi
-	@if test "$(LIBMODBUS)" != enabled; then echo "warning: libmodbus is unavailable; Modbus code will use its ENOSYS fallback" >&2; fi
-	@if test "$(RKMPP_ENCODER)" != available; then echo "warning: this sysroot does not expose the h264_rkmpp FFmpeg encoder; use the board/Jammy sysroot for deployment" >&2; fi
 
 print-config:
 	@echo "PROFILE=$(PROFILE)"
@@ -116,6 +145,8 @@ test:
 	bash tests/test_jammy_setup.sh
 	bash tests/test_jammy_deps.sh
 	bash tests/test_ffmpeg6_rkmpp_config.sh
+	bash tests/test_jammy_strict_env.sh
+	bash tests/test_elf_dependency_check.sh
 	bash tests/test_build_config.sh
 	bash tests/test_sdk_setup.sh
 	bash tests/test_optional_deps_build.sh

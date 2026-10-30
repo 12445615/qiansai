@@ -30,7 +30,7 @@ make_pkg() {
     local name=$1 arch=$2
     local root="$pkgroot/$name"
     mkdir -p "$root/DEBIAN"
-    printf 'Package: %s\nVersion: 1.0\nArchitecture: %s\nDescription: fixture\n' "$name" "$arch" >"$root/DEBIAN/control"
+    printf 'Package: %s\nVersion: 1.0\nArchitecture: %s\nMaintainer: fixture\nDescription: fixture\n' "$name" "$arch" >"$root/DEBIAN/control"
     dpkg-deb --build --root-owner-group "$root" "$tmp/packages/${name}_1.0_${arch}.deb" >/dev/null
 }
 make_pkg libpaho-mqtt1.3 arm64
