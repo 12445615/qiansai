@@ -111,6 +111,7 @@ print-config:
 
 test:
 	bash tests/test_profile_config.sh
+	bash tests/test_build_wrapper.sh
 	bash tests/test_build_config.sh
 	bash tests/test_sdk_setup.sh
 	bash tests/test_optional_deps_build.sh
