@@ -1,5 +1,6 @@
 #include <cstring>
 #include <rknn/rknn_api.h>
+#include <cstdio>
 #include <rga/im2d.h>
 
 int main() {

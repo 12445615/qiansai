@@ -13,6 +13,7 @@ toolchain_root="$HOME/.local/opt/elf2-sdk/toolchains/gcc-arm-10.3-aarch64"
 source_cache="$HOME/.local/opt/elf2-sdk/sources/ffmpeg-rockchip-${commit}.tar.gz"
 jobs=1
 print_only=0
+configure_only=0
 
 usage() {
     cat <<'EOF'
@@ -24,6 +25,7 @@ EOF
 while (($#)); do
     case "$1" in
         --print-config) print_only=1; shift ;;
+        --configure-only) configure_only=1; shift ;;
         --sysroot|--toolchain-root|--source-cache)
             (($# >= 2)) || { echo "error: $1 requires a value" >&2; exit 2; }
             case "$1" in
@@ -52,6 +54,7 @@ config_flags=(
     --disable-autodetect
     --disable-everything
     --enable-rkmpp
+    --enable-version3
     --enable-libdrm
     --enable-encoder=h264_rkmpp
     --enable-encoder=aac
@@ -67,6 +70,7 @@ config_flags=(
     --arch=aarch64
     --target-os=linux
     --cross-prefix="$cross_prefix"
+    --pkg-config=pkg-config
     --sysroot="$sysroot"
     --enable-network
     --enable-swresample
@@ -109,6 +113,10 @@ extra_cflags="-I$sysroot/usr/include -I$sysroot/usr/local/include"
 extra_ldflags="-L$sysroot/usr/local/lib -L$sysroot/usr/lib/aarch64-linux-gnu"
 (cd "$build_dir" && "$source_dir/configure" "${config_flags[@]}" \
     --extra-cflags="$extra_cflags" --extra-ldflags="$extra_ldflags")
+if ((configure_only)); then
+    echo "FFmpeg-Rockchip configure passed: $build_dir"
+    exit 0
+fi
 make -C "$build_dir" -j"$jobs"
 components="$build_dir/config_components.h"
 for macro in CONFIG_H264_RKMPP_ENCODER CONFIG_AAC_ENCODER CONFIG_FLV_MUXER CONFIG_MPEGTS_MUXER CONFIG_RTMP_PROTOCOL; do
@@ -125,7 +133,7 @@ cp -a "$stage/usr/local/." "$sysroot/usr/local/"
 mkdir -p "$sysroot/manifests"
 {
     printf 'COMMIT=%s\nSOURCE_URL=%s\nSOURCE_SHA256=%s\n' "$commit" "$source_url" "$source_sha256"
-    printf 'CONFIGURE_SHA256=%s\n' "$(sha256sum "$build_dir/config.log" | awk '{print $1}')"
+    printf 'CONFIGURE_SHA256=%s\n' "$(sha256sum "$build_dir/ffbuild/config.log" | awk '{print $1}')"
 } >"$sysroot/manifests/ffmpeg-rockchip.txt"
 {
     for macro in CONFIG_H264_RKMPP_ENCODER CONFIG_AAC_ENCODER CONFIG_FLV_MUXER CONFIG_MPEGTS_MUXER CONFIG_RTMP_PROTOCOL; do

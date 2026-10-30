@@ -22,6 +22,7 @@ ln -s librga.so.2 "$tmp/sysroot/usr/lib/aarch64-linux-gnu/librga.so"
 printf 'rknn header\n' >"$tmp/buildroot/usr/include/rknn/rknn_api.h"
 printf 'rga header\n' >"$tmp/buildroot/usr/include/rga/im2d.h"
 printf 'drm header\n' >"$tmp/buildroot/usr/include/libdrm/drm.h"
+printf 'xf86drm header\n' >"$tmp/buildroot/usr/include/xf86drm.h"
 printf 'mpp header\n' >"$tmp/mpp/include/rk_mpi.h"
 printf 'prefix=/usr/local\n' >"$tmp/mpp/rockchip_mpp.pc"
 printf 'freetype header\n' >"$tmp/freetype/ft2build.h"
@@ -62,7 +63,8 @@ bash "$project_dir/scripts/install_elf2_jammy_deps.sh" \
     --buildroot-sysroot "$tmp/buildroot" \
     --mpp-include "$tmp/mpp/include" \
     --mpp-pc "$tmp/mpp/rockchip_mpp.pc" \
-    --freetype-include "$tmp/freetype"
+    --freetype-include "$tmp/freetype" \
+    --rknn-runtime "$tmp/sysroot/usr/lib/aarch64-linux-gnu/librknnrt.so"
 
 test -f "$tmp/sysroot/usr/include/MQTTClient.h"
 test -f "$tmp/sysroot/usr/include/modbus/modbus.h"
@@ -72,6 +74,7 @@ test -f "$tmp/sysroot/usr/local/include/rockchip/rk_mpi.h"
 test -L "$tmp/sysroot/usr/lib/aarch64-linux-gnu/librockchip_mpp.so"
 test -f "$tmp/sysroot/usr/include/rknn/rknn_api.h"
 test -f "$tmp/sysroot/usr/include/rga/im2d.h"
+test -f "$tmp/sysroot/usr/include/xf86drm.h"
 test -f "$tmp/sysroot/manifests/development-overlay.txt"
 
 echo 'Jammy development overlay installs arm64 dependencies'

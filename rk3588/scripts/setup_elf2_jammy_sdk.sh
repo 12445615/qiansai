@@ -124,6 +124,46 @@ for spec in \
     fi
 done
 
+# Keep the startup objects from the extracted Jammy rootfs and provide
+# multiarch linker inputs for the GCC 10.3 driver.  The rootfs runtime libc
+# remains authoritative; the linker scripts below avoid accidentally selecting
+# the GCC bundle's older /lib64 glibc when resolving vendor libraries.
+multiarch_lib="$stage/sysroot/lib/aarch64-linux-gnu"
+multiarch_dev="$stage/sysroot/usr/lib/aarch64-linux-gnu"
+driver_lib="$stage/sysroot/usr/lib64"
+mkdir -p "$multiarch_lib" "$multiarch_dev" "$driver_lib"
+for crt in crt1.o crti.o crtn.o; do
+    if [[ -e "$multiarch_lib/$crt" ]]; then
+        cp -a "$multiarch_lib/$crt" "$driver_lib/$crt"
+    else
+        gcc_crt="$toolchain_source/aarch64-none-linux-gnu/libc/usr/lib64/$crt"
+        [[ -e "$gcc_crt" ]] && cp -a "$gcc_crt" "$driver_lib/$crt"
+    fi
+done
+if [[ -e "$multiarch_lib/libc.so.6" && -e "$multiarch_dev/libc_nonshared.a" ]]; then
+    for libc_script in "$multiarch_dev/libc.so" "$driver_lib/libc.so"; do
+        printf '%s\n' \
+            '/* ELF2 Jammy multiarch libc linker script */' \
+            'OUTPUT_FORMAT(elf64-littleaarch64)' \
+            'GROUP ( /lib/aarch64-linux-gnu/libc.so.6 /usr/lib/aarch64-linux-gnu/libc_nonshared.a AS_NEEDED ( /lib/aarch64-linux-gnu/ld-linux-aarch64.so.1 ) )' \
+            >"$libc_script"
+    done
+    for lib in pthread m rt dl util; do
+        [[ -e "$multiarch_lib/lib$lib.so.0" ]] || continue
+        ln -sfn "../../../lib/aarch64-linux-gnu/lib$lib.so.0" "$multiarch_dev/lib$lib.so"
+        ln -sfn "../../lib/aarch64-linux-gnu/lib$lib.so.0" "$driver_lib/lib$lib.so"
+    done
+fi
+# The GCC bundle contains an older libstdc++ (GLIBCXX_3.4.26).  Prefer the
+# Jammy runtime extracted from the board image (GLIBCXX_3.4.30) for both link
+# and deployment; keep the GCC C++ headers in place.
+if [[ -e "$multiarch_lib/libstdc++.so.6" ]]; then
+    rm -f "$driver_lib"/libstdc++.so "$driver_lib"/libstdc++.so.6 "$driver_lib"/libstdc++.so.6.* "$driver_lib"/libstdc++.so.6.*-gdb.py
+    ln -sfn "../../lib/aarch64-linux-gnu/libstdc++.so.6" "$driver_lib/libstdc++.so"
+    ln -sfn "../../lib/aarch64-linux-gnu/libstdc++.so.6" "$driver_lib/libstdc++.so.6"
+    ln -sfn "../../../lib/aarch64-linux-gnu/libstdc++.so.6" "$multiarch_dev/libstdc++.so"
+fi
+
 manifest_dir="$stage/manifests"
 if debugfs -R 'stat /etc/os-release' "$rootfs_image" 2>/dev/null | grep -q 'Inode:'; then
     debugfs -R "dump /etc/os-release $manifest_dir/os-release" "$rootfs_image" >/dev/null 2>&1
