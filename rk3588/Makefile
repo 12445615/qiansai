@@ -115,6 +115,7 @@ test:
 	bash tests/test_capture_rockchip_tools.sh
 	bash tests/test_jammy_setup.sh
 	bash tests/test_jammy_deps.sh
+	bash tests/test_ffmpeg6_rkmpp_config.sh
 	bash tests/test_build_config.sh
 	bash tests/test_sdk_setup.sh
 	bash tests/test_optional_deps_build.sh
