@@ -154,4 +154,6 @@ test:
 clean:
 	rm -f $(OBJS) $(DEPS) $(TARGET)
 
+include $(ROOT_DIR)/mk/recovery.mk
+
 -include $(DEPS)
