@@ -43,7 +43,7 @@
 | R39 | §18 R39 | TBD | host | NOT_RUN | — |
 | R40 | §18 R40 | TBD | host | NOT_RUN | — |
 | R41 | §18 R41 | TBD | host | NOT_RUN | — |
-| R42 | §18 R42 | TBD | host | NOT_RUN | — |
+| R42 | §18 R42 | `R42_canonical_nested_lengths_prevent_concatenation_collision` | host g++ / C++20; ASan+UBSan | PASS | `make recovery-test recovery-compile-fail-test recovery-sanitize-test`; `tests/recovery/test_canonical.cc` |
 | R43 | §18 R43 | TBD | host | NOT_RUN | — |
 | R44 | §18 R44 | TBD | host | NOT_RUN | — |
 | R45 | §18 R45 | TBD | host | NOT_RUN | — |
@@ -53,14 +53,14 @@
 | R49 | §18 R49 | TBD | host | NOT_RUN | — |
 | R50 | §18 R50 | TBD | host | NOT_RUN | — |
 | R51 | §18 R51 | TBD | host | NOT_RUN | — |
-| R52 | §18 R52 | TBD | host | NOT_RUN | — |
+| R52 | §18 R52 | `permit_move_assign.cc` deleted move-assignment rejection | host g++ / C++20 | PASS | `make recovery-compile-fail-test`; `build/host/recovery/compile_fail/permit_move_assign.cc.log` |
 | R53 | §18 R53 | TBD | host | NOT_RUN | — |
 | R54 | §18 R54 | TBD | host | NOT_RUN | — |
 | R55 | §18 R55 | TBD | host | NOT_RUN | — |
 | R56 | §18 R56 | TBD | host | NOT_RUN | — |
 | R57 | §18 R57 | TBD | host | NOT_RUN | — |
 | R58 | §18 R58 | TBD | host | NOT_RUN | — |
-| R59 | §18 R59 | TBD | host | NOT_RUN | — |
+| R59 | §18 R59 | `R59_typed_predicate_keys_do_not_interchange`; `cross_type_predicate.cc` | host g++ / C++20; ASan+UBSan | PASS | `make recovery-test recovery-compile-fail-test recovery-sanitize-test`; `tests/recovery/test_types.cc`; `build/host/recovery/compile_fail/cross_type_predicate.cc.log` |
 | R60 | §18 R60 | TBD | host | NOT_RUN | — |
 | R61 | §18 R61 | TBD | host | NOT_RUN | — |
 | R62 | §18 R62 | TBD | host | NOT_RUN | — |
@@ -76,8 +76,8 @@
 | R72 | §18 R72 | TBD | host | NOT_RUN | — |
 | R73 | §18 R73 | TBD | host | NOT_RUN | — |
 | R74 | §18 R74 | TBD | host | NOT_RUN | — |
-| R75 | §18 R75 | TBD | host | NOT_RUN | — |
-| R76 | §18 R76 | TBD | host | NOT_RUN | — |
+| R75 | §18 R75 | Preliminary type-level coverage: `R75_permit_binding_distinguishes_recovery_instances`; production `lease_matches` not implemented | host g++ / C++20; ASan+UBSan | NOT_RUN | `tests/recovery/test_types.cc`; production cross-recovery rejection remains unverified |
+| R76 | §18 R76 | Preliminary type-level coverage: `R76_permit_move_and_consume_invalidate_handle`; production `consume_locked` not implemented | host g++ / C++20; ASan+UBSan | NOT_RUN | `tests/recovery/test_types.cc`; production consume path remains unverified |
 | R77 | §18 R77 | TBD | host | NOT_RUN | — |
 | R78 | §18 R78 | TBD | host | NOT_RUN | — |
 | R79 | §18 R79 | TBD | host | NOT_RUN | — |
@@ -127,7 +127,7 @@
 | R123 | §18 R123 | TBD | host | NOT_RUN | — |
 | R124 | §18 R124 | TBD | host | NOT_RUN | — |
 | R125 | §18 R125 | TBD | host | NOT_RUN | — |
-| R126 | §18 R126 | TBD | host | NOT_RUN | — |
+| R126 | §18 R126 | `R126_executor_principal_has_only_process_and_coordinator` | host g++ / C++20; ASan+UBSan | PASS | `make recovery-test recovery-sanitize-test`; `tests/recovery/test_types.cc` |
 | R127 | §18 R127 | TBD | host | NOT_RUN | — |
 | R128 | §18 R128 | TBD | host | NOT_RUN | — |
 | R129 | §18 R129 | TBD | host | NOT_RUN | — |
