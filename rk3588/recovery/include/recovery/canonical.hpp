@@ -19,6 +19,8 @@
 
 namespace recovery {
 
+struct FrozenRuntimeSnapshot;
+
 namespace detail {
 template <std::size_t Count>
 constexpr void validate_variant_alternative_count() {
@@ -68,6 +70,12 @@ void canonical_write(CanonicalWriter& writer, Enum value) {
 inline void canonical_write(CanonicalWriter& writer, const std::string& value) {
     writer.write_count(value.size());
     writer.write_bytes(reinterpret_cast<const std::uint8_t*>(value.data()), value.size());
+}
+
+template <typename First, typename Second>
+void canonical_write(CanonicalWriter& writer, const std::pair<First, Second>& value) {
+    canonical_write(writer, value.first);
+    canonical_write(writer, value.second);
 }
 
 template <typename Value>
@@ -139,6 +147,11 @@ inline void canonical_write(CanonicalWriter& writer, const ProcessIdentity& valu
     canonical_write(writer, value.pid);
     canonical_write(writer, value.start_generation);
 }
+
+void canonical_write(CanonicalWriter&, const RecoveryInstanceId&);
+void canonical_write(CanonicalWriter&, const ProcessExitBindingId&);
+void canonical_write(CanonicalWriter&, const ProcessExitBindingDescriptor&);
+void canonical_write(CanonicalWriter&, const FrozenRuntimeSnapshot&);
 
 inline void canonical_write(CanonicalWriter& writer, const ProcessPrincipal& value) {
     canonical_write(writer, value.process);

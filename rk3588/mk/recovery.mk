@@ -14,8 +14,9 @@ RECOVERY_PRODUCTION_OBJECTS := $(patsubst $(RECOVERY_SOURCE_DIR)/%.cc,$(RECOVERY
 RECOVERY_TEST_DEPFILES := $(RECOVERY_TEST_OBJECTS:.o=.d)
 RECOVERY_PRODUCTION_DEPFILES := $(RECOVERY_PRODUCTION_OBJECTS:.o=.d)
 RECOVERY_TEST_BINARY := $(RECOVERY_BUILD_DIR)/recovery_tests
+RECOVERY_LDLIBS := -lcrypto
 
-.PHONY: recovery-print-config recovery-test recovery-compile-fail-test recovery-sanitize-test
+.PHONY: recovery-print-config recovery-test recovery-compile-fail-test recovery-sanitize-test recovery-cross-check
 
 recovery-print-config:
 	@echo "RECOVERY_CXX_STANDARD=$(RECOVERY_CXX_STANDARD)"
@@ -32,8 +33,14 @@ recovery-sanitize-test:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) -B RECOVERY_BUILD_DIR=$(RECOVERY_BUILD_DIR)/sanitize \
 		RECOVERY_CXXFLAGS="$(RECOVERY_CXXFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer" recovery-test
 
+recovery-cross-check:
+	$(ROOT_DIR)/tests/test_recovery_task3_boundary.sh
+	HOST_CXX="$(HOST_CXX)" CROSS_COMPILE="$(CROSS_COMPILE)" \
+		RECOVERY_CROSS_CXX="$(CXX)" RECOVERY_SYSROOT="$(SYSROOT)" \
+		$(ROOT_DIR)/tests/test_recovery_digest_probe.sh
+
 $(RECOVERY_TEST_BINARY): $(RECOVERY_TEST_OBJECTS) $(RECOVERY_PRODUCTION_OBJECTS)
-	$(HOST_CXX) $(RECOVERY_CXXFLAGS) -o $@ $^
+	$(HOST_CXX) $(RECOVERY_CXXFLAGS) -o $@ $^ $(RECOVERY_LDLIBS)
 
 $(RECOVERY_BUILD_DIR)/%.o: $(RECOVERY_TEST_DIR)/%.cc $(RECOVERY_TEST_DIR)/test_support.hpp
 	@mkdir -p $(dir $@)

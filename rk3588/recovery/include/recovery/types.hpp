@@ -13,6 +13,8 @@ using Digest = std::array<std::uint8_t, 32>;
 using TransactionHash = Digest;
 using BootId = std::uint64_t;
 using RecoverySeq = std::uint64_t;
+using FreezeSeq = std::uint64_t;
+using ProcessExitBindingSeq = std::uint64_t;
 using ProcessId = std::uint64_t;
 using ThreadId = std::uint64_t;
 using ActionId = std::uint64_t;
@@ -36,6 +38,19 @@ struct ProcessIdentity {
     ProcessId pid;
     std::uint64_t start_generation;
     auto operator<=>(const ProcessIdentity&) const = default;
+};
+
+struct ProcessExitBindingId {
+    RecoveryInstanceId recovery_id;
+    FreezeSeq freeze_seq;
+    ProcessExitBindingSeq binding_seq;
+    auto operator<=>(const ProcessExitBindingId&) const = default;
+};
+
+struct ProcessExitBindingDescriptor {
+    ProcessExitBindingId id;
+    ProcessIdentity process;
+    auto operator<=>(const ProcessExitBindingDescriptor&) const = default;
 };
 
 using SubjectIdentity = std::variant<ThreadIdentity, ProcessIdentity>;

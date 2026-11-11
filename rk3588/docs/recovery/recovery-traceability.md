@@ -1,16 +1,20 @@
 # Recovery Traceability
 
+Scope: R1–R164 and §19.1–§19.21. The design input is **frozen** (Codex technical review passed, 2026-11-11) with SHA-256 `65F25A5A7CBC7E18F39ADDFA54CA0E8ACE5C6E67DEBFBA75480548EB4F215F5A`; see `docs/recovery/recovery-design-baseline.md` (`status = FROZEN`).
+
+Task 3 may resume against this baseline and executes **R162**. R163 (Task 4) and R164 (Task 5) remain `NOT_RUN`, as do R4–R6/R43/R44 (Task 4 runtime seal). Every row stays `NOT_RUN` until its owning task actually executes the test and records the command plus observed output — a freeze authorizes execution, it does not advance any row. Advancing a row requires the RED-then-GREEN evidence against the frozen contracts, not the pre-freeze code that happens to compile.
+
 | ID | design clause | automated test | environment | status | evidence |
 | --- | --- | --- | --- | --- | --- |
-| R1 | §18 R1 | TBD | host | NOT_RUN | — |
-| R2 | §18 R2 | TBD | host | NOT_RUN | — |
-| R3 | §18 R3 | TBD | host | NOT_RUN | — |
+| R1 | §18 R1 | `compile_fail/program_construct.cc` (default + full-field construction) | host | PASS | `make recovery-compile-fail-test`: intended private/no-matching-constructor diagnostic |
+| R2 | §18 R2 | `R2_R7_empty_fault_is_explicit_failure` + non-default-constructible `CompileResult` assertion | host | PASS | `make -B recovery-test`: explicit `EMPTY_FAULT_BATCH`, no default success |
+| R3 | §18 R3 | `compile_fail/program_mutate.cc`, `compile_fail/program_move_assign.cc` | host | PASS | `make recovery-compile-fail-test`: accessor mutation and whole-program move assignment rejected |
 | R4 | §18 R4 | TBD | host | NOT_RUN | — |
 | R5 | §18 R5 | TBD | host | NOT_RUN | — |
 | R6 | §18 R6 | TBD | host | NOT_RUN | — |
-| R7 | §18 R7 | TBD | host | NOT_RUN | — |
-| R8 | §18 R8 | TBD | host | NOT_RUN | — |
-| R9 | §18 R9 | TBD | host | NOT_RUN | — |
+| R7 | §18 R7 | `R7_every_compile_failure_kind_is_an_explicit_error_alternative` | host | PASS | `make -B recovery-test`: all eight failure kinds represented only as `CompileFailure` |
+| R8 | §18 R8 | `compile_fail/compiler_fifth_argument.cc` + cross compile probe | host + AArch64 compile/link | PASS | `make recovery-compile-fail-test recovery-cross-check`: fifth argument rejected; four-argument API compiles/links |
+| R9 | §18 R9 | `R9_same_inputs_compile_byte_identically`, `R9_snapshot_canonical_order_pins_process_bindings_between_owner_and_epoch` | host | PASS | `make -B recovery-test`: canonical component bytes and transaction hash equal; snapshot field order pinned |
 | R10 | §18 R10 | TBD | host | NOT_RUN | — |
 | R11 | §18 R11 | TBD | host | NOT_RUN | — |
 | R12 | §18 R12 | TBD | host | NOT_RUN | — |
@@ -45,7 +49,7 @@
 | R41 | §18 R41 | TBD | host | NOT_RUN | — |
 | R42 | §18 R42 | `R42_canonical_nested_lengths_prevent_concatenation_collision` | host g++ / C++20; ASan+UBSan | PASS | `make recovery-test recovery-compile-fail-test recovery-sanitize-test`; `tests/recovery/test_canonical.cc` |
 | R43 | §18 R43 | TBD | host | NOT_RUN | — |
-| R44 | §18 R44 | TBD | host | NOT_RUN | — |
+| R44 | §18 R44 | Task 3 partial: `compile_fail/program_construct.cc`; Task 4 seal identity/hash test pending | host | NOT_RUN | private full-field construction rejected; overall rule remains NOT_RUN until Task 4 |
 | R45 | §18 R45 | TBD | host | NOT_RUN | — |
 | R46 | §18 R46 | TBD | host | NOT_RUN | — |
 | R47 | §18 R47 | TBD | host | NOT_RUN | — |
@@ -57,7 +61,7 @@
 | R53 | §18 R53 | TBD | host | NOT_RUN | — |
 | R54 | §18 R54 | TBD | host | NOT_RUN | — |
 | R55 | §18 R55 | TBD | host | NOT_RUN | — |
-| R56 | §18 R56 | TBD | host | NOT_RUN | — |
+| R56 | §18 R56 | `R56_missing_or_replaced_predicate_is_rejected` | host | PASS | `make -B recovery-test`: private test seam removes/replaces derived predicate; both return `TARGET_PREDICATE_MISMATCH` |
 | R57 | §18 R57 | TBD | host | NOT_RUN | — |
 | R58 | §18 R58 | TBD | host | NOT_RUN | — |
 | R59 | §18 R59 | `R59_typed_predicate_keys_do_not_interchange`; `cross_type_predicate.cc` | host g++ / C++20; ASan+UBSan | PASS | `make recovery-test recovery-compile-fail-test recovery-sanitize-test`; `tests/recovery/test_types.cc`; `build/host/recovery/compile_fail/cross_type_predicate.cc.log` |
@@ -128,7 +132,7 @@
 | R124 | §18 R124 | TBD | host | NOT_RUN | — |
 | R125 | §18 R125 | TBD | host | NOT_RUN | — |
 | R126 | §18 R126 | `R126_executor_principal_has_only_process_and_coordinator` | host g++ / C++20; ASan+UBSan | PASS | `make recovery-test recovery-sanitize-test`; `tests/recovery/test_types.cc` |
-| R127 | §18 R127 | TBD | host | NOT_RUN | — |
+| R127 | §18 R127 | six `R127_*_is_explicit_closure_failure` tests | host | PASS | `make -B recovery-test`: five closure failure kinds plus recipe-index error are explicit, no empty-DAG fallback |
 | R128 | §18 R128 | TBD | host | NOT_RUN | — |
 | R129 | §18 R129 | TBD | host | NOT_RUN | — |
 | R130 | §18 R130 | TBD | host | NOT_RUN | — |
@@ -139,7 +143,7 @@
 | R135 | §18 R135 | TBD | host | NOT_RUN | — |
 | R136 | §18 R136 | TBD | host | NOT_RUN | — |
 | R137 | §18 R137 | TBD | host | NOT_RUN | — |
-| R138 | §18 R138 | TBD | host | NOT_RUN | — |
+| R138 | §18 R138 | `R138_all_compile_allocation_stages_fail_explicitly` | host | PASS | `make -B recovery-test`: four private allocation stages each return only `ALLOCATION_FAILED`, no program |
 | R139 | §18 R139 | TBD | host | NOT_RUN | — |
 | R140 | §18 R140 | TBD | host | NOT_RUN | — |
 | R141 | §18 R141 | TBD | host | NOT_RUN | — |
@@ -163,6 +167,9 @@
 | R159 | §18 R159 | TBD | host | NOT_RUN | — |
 | R160 | §18 R160 | TBD | host | NOT_RUN | — |
 | R161 | §18 R161 | TBD | host | NOT_RUN | — |
+| R162 | §18 R162 | six `R162_*_is_unresolved` tests in `test_process_exit_binding.cc` through public four-argument `RecoveryCompiler::compile` | host | PASS | `make -B recovery-test`: valid non-binding prerequisites; all five structural cases plus missing descriptor return outer `PREDICATE_DERIVATION_FAILED` with inner `EXECUTION_TARGET_UNRESOLVED`, and no program |
+| R163 | §18 R163 | `test_process_exit_freeze.cc` + `compile_fail/owned_process_exit_canonical.cc`（须校验 `no matching function for call to 'canonical_write'` 诊断）(Task 4) | host | NOT_RUN | — |
+| R164 | §18 R164 | `test_process_exit_observation.cc` (Task 5) | host | NOT_RUN | — |
 | §19.1 | §19.1 | TBD | RK3588 target | UNVERIFIED | — |
 | §19.2 | §19.2 | TBD | RK3588 target | UNVERIFIED | — |
 | §19.3 | §19.3 | TBD | RK3588 target | UNVERIFIED | — |
@@ -184,3 +191,5 @@
 | §19.19 | §19.19 | TBD | RK3588 target | UNVERIFIED | — |
 | §19.20 | §19.20 | TBD | RK3588 target | UNVERIFIED | — |
 | §19.21 | §19.21 | TBD | RK3588 target | UNVERIFIED | — |
+
+Note: Task 3's "no fd in the compiler/canonical translation units" boundary is **not** an R rule. Its evidence is the source scan `tests/test_recovery_task3_boundary.sh` (zero matches required, failing output must name file + line). That scan and R163's compile-fail case (`compile_fail/owned_process_exit_canonical.cc`, which must fail with `no matching function for call to 'canonical_write'`) prove different things and may not substitute for each other.
