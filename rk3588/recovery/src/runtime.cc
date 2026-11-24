@@ -1,6 +1,10 @@
 #include "recovery/runtime.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <new>
 #include <fcntl.h>
 #include <fstream>
 #include <set>
@@ -131,6 +135,14 @@ void RecoveryCoordinator::checkpoint(RuntimeFailureStage stage) {
 }
 #endif
 
+void fatal_watchdog_reboot(const char* reason) noexcept {
+    static constexpr char prefix[] = "recovery: fatal watchdog reboot: ";
+    (void)!::write(STDERR_FILENO, prefix, sizeof prefix - 1);
+    if (reason) (void)!::write(STDERR_FILENO, reason, std::strlen(reason));
+    (void)!::write(STDERR_FILENO, "\n", 1);
+    std::_Exit(kWatchdogRebootExitCode);
+}
+
 void RecoveryCoordinator::fail_closed_locked(const char* reason) noexcept {
     slot_.fail_reason = reason;
     slot_.state = RecoverySlotState::FAIL_CLOSED;
@@ -204,47 +216,90 @@ RecoveryCoordinator::prepare_fault_batch_close() const {
     return prepared;
 }
 
-// Task 4F RED skeleton: only the return type follows §6.1; the R166 behaviour
-// (error-code mapping, sequence exhaustion, lock watchdog) is not yet implemented.
 BeginFreezeResult RecoveryCoordinator::begin_freeze(
     const std::vector<FrozenGrantRecord>& ledger,
     const std::vector<OwnerExecutorBinding>& owner_bindings) noexcept {
-    std::scoped_lock guard{mutex_};
-    if (slot_.state != RecoverySlotState::PREPARING || !slot_.active)
+    std::unique_lock<std::mutex> guard;
+    try {
+#ifdef RECOVERY_TESTING
+        checkpoint(RuntimeFailureStage::BEGIN_FREEZE_LOCK);
+#endif
+        guard = std::unique_lock<std::mutex>{mutex_};
+    } catch (...) {
+        fatal_watchdog_reboot("begin_freeze lock failed");
+    }
+    if (slot_.state != RecoverySlotState::PREPARING)
         return BeginFreezeError{BeginFreezeErrorCode::WRONG_PHASE};
+    if (!slot_.active) {
+        fail_closed_locked("begin_freeze active missing");
+        return BeginFreezeError{BeginFreezeErrorCode::INTERNAL_FAILURE};
+    }
+    if (slot_.freeze_seq == std::numeric_limits<FreezeSeq>::max()) {
+        fail_closed_locked("freeze seq exhausted");
+        return BeginFreezeError{BeginFreezeErrorCode::SEQUENCE_EXHAUSTED};
+    }
+
+    // Phase A: every fallible step builds locals only.
+    struct PreparedBeginFreeze {
+        FreezeSeq next_freeze_seq;
+        GrantSeq grant_cutoff;
+        std::vector<FrozenGrantRecord> ledger_prefix;
+        Digest ledger_prefix_digest;
+        std::vector<OwnerExecutorBinding> owner_bindings;
+        FreezeRequest request;
+    };
+    std::optional<PreparedBeginFreeze> prepared;
     try {
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::BEGIN_FREEZE_PREPARE);
 #endif
-        auto prepared_ledger = ledger;
-        auto prepared_bindings = owner_bindings;
+        auto prefix = ledger;
+        auto bindings = owner_bindings;
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::BEGIN_FREEZE_AFTER_COPY);
 #endif
-        GrantSeq prepared_cutoff{};
-        for (const auto& grant : prepared_ledger)
-            prepared_cutoff = std::max(prepared_cutoff, grant.identity.seq);
-        const auto prepared_digest = canonical_digest(prepared_ledger);
-        const FreezeSeq prepared_freeze_seq = slot_.freeze_seq + 1;
-        FreezeRequest prepared_request{slot_.active->recovery_id, prepared_freeze_seq,
-            slot_.boot_id, slot_.closing_generation, prepared_cutoff, prepared_digest};
+        GrantSeq cutoff{};
+        for (const auto& grant : prefix) cutoff = std::max(cutoff, grant.identity.seq);
+        const Digest prefix_digest = canonical_digest(prefix);
+        const FreezeSeq next = slot_.freeze_seq + 1;   // exhaustion excluded above
+        const FreezeRequest request{slot_.active->recovery_id, next, slot_.boot_id,
+                                    slot_.closing_generation, cutoff, prefix_digest};
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::BEGIN_FREEZE_AFTER_DIGEST);
 #endif
-        slot_.active->ledger_prefix = std::move(prepared_ledger);
-        slot_.active->owner_executor_bindings = std::move(prepared_bindings);
-        slot_.active->grant_cutoff = prepared_cutoff;
-        slot_.active->ledger_prefix_digest = prepared_digest;
-        slot_.active->freeze_request = prepared_request;
-        slot_.freeze_seq = prepared_freeze_seq;
-        slot_.state = RecoverySlotState::FREEZING;
-        return prepared_request;
+        prepared.emplace(PreparedBeginFreeze{next, cutoff, std::move(prefix), prefix_digest,
+                                             std::move(bindings), request});
+    } catch (const std::bad_alloc&) {
+        return BeginFreezeError{BeginFreezeErrorCode::ALLOCATION_FAILED};
+    } catch (...) {
+        fail_closed_locked("begin_freeze build failed");
+        return BeginFreezeError{BeginFreezeErrorCode::INTERNAL_FAILURE};
     }
-    catch (...) { return BeginFreezeError{BeginFreezeErrorCode::ALLOCATION_FAILED}; }
+
+    // Phase B: nothrow moves and scalar writes; state is published last. The
+    // request is returned, not stored: callers re-send this exact value.
+    static_assert(std::is_nothrow_move_assignable_v<std::vector<FrozenGrantRecord>>);
+    static_assert(std::is_nothrow_move_assignable_v<std::vector<OwnerExecutorBinding>>);
+    static_assert(std::is_nothrow_constructible_v<BeginFreezeResult, FreezeRequest>);
+    slot_.freeze_seq = prepared->next_freeze_seq;
+    slot_.active->grant_cutoff = prepared->grant_cutoff;
+    slot_.active->ledger_prefix = std::move(prepared->ledger_prefix);
+    slot_.active->ledger_prefix_digest = prepared->ledger_prefix_digest;
+    slot_.active->owner_executor_bindings = std::move(prepared->owner_bindings);
+    slot_.state = RecoverySlotState::FREEZING;
+    return prepared->request;
 }
 
 bool RecoveryCoordinator::commit_freeze() noexcept {
-    std::scoped_lock guard{mutex_};
+    std::unique_lock<std::mutex> guard;
+    try {
+#ifdef RECOVERY_TESTING
+        checkpoint(RuntimeFailureStage::FREEZE_LOCK);
+#endif
+        guard = std::unique_lock<std::mutex>{mutex_};
+    } catch (...) {
+        fatal_watchdog_reboot("commit_freeze lock failed");
+    }
     if (slot_.state == RecoverySlotState::FROZEN) {
         fail_closed_locked("freeze already published"); return false;
     }

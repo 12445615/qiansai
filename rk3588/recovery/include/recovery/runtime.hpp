@@ -11,6 +11,12 @@
 
 namespace recovery {
 
+// Last-resort exit when the coordinator mutex cannot be acquired: no state is
+// written and nothing unwinds. The board supervisor/watchdog turns this exit
+// into a restart (§19, UNVERIFIED on target).
+inline constexpr int kWatchdogRebootExitCode = 86;
+[[noreturn]] void fatal_watchdog_reboot(const char* reason) noexcept;
+
 #ifdef RECOVERY_TESTING
 class RecoveryRuntimeTestAccess;
 struct RecoveryTestAccess;
@@ -23,9 +29,9 @@ enum class RuntimeFailureStage : std::uint32_t {
     BEGIN_COMPILE_PUBLISH, FINISH_COMPILE_INSTALL, SEAL_PUBLISH,
     BEGIN_FREEZE_LOCK, FREEZE_LOCK
 };
-// Exit code of the test watchdog stub: a lock-acquire failure must end the
-// process here, never through std::terminate (R166 ⑦, R167).
-inline constexpr int kRecoveryTestWatchdogExitCode = 86;
+// A lock-acquire failure must end the process through fatal_watchdog_reboot,
+// never through std::terminate (R166 ⑦, R167).
+inline constexpr int kRecoveryTestWatchdogExitCode = kWatchdogRebootExitCode;
 class RuntimeFailureProvider {
 public:
     virtual ~RuntimeFailureProvider() = default;
@@ -92,7 +98,6 @@ struct RecoveryInstanceRuntime {
     std::vector<FrozenGrantRecord> ledger_prefix;
     GrantSeq grant_cutoff{};
     Digest ledger_prefix_digest{};
-    std::optional<FreezeRequest> freeze_request;
     std::vector<OwnerExecutorBinding> owner_executor_bindings;
     std::map<OwnerId, OwnerSnapshotAck> owner_acks;
     Digest owner_ack_canonical_digest{};

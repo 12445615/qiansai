@@ -151,7 +151,6 @@ RECOVERY_TEST(R137_runtime_failure_matrix_preserves_prepublication_state) {
         RECOVERY_CHECK_EQ(c.state(), recovery::RecoverySlotState::PREPARING);
         RECOVERY_CHECK(c.active().ledger_prefix.empty());
         RECOVERY_CHECK(c.active().owner_executor_bindings.empty());
-        RECOVERY_CHECK(!c.active().freeze_request.has_value());
     }
     {
         ThrowAt failure{recovery::RuntimeFailureStage::BEGIN_COMPILE_PUBLISH};

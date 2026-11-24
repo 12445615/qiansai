@@ -2,14 +2,15 @@
 
 > **2026-11-24 — design FROZEN at `FE40C186…`, erratum baseline `62FE0D72…` (see `recovery-design-baseline.md`), Task 4 EXECUTING.**
 > Every PASS / CANDIDATE PASS row below predates this freeze and is regression evidence only until
-> re-run against the frozen hash. First RED slices, run on host (Ubuntu 24.04 g++, `make recovery-test`
-> / `recovery-compile-fail-test`):
+> re-run against the frozen hash. Task 4 slices, host Ubuntu 24.04 g++ (`make recovery-test`,
+> ASan+UBSan build, `recovery-compile-fail-test`, `recovery-task4-boundary`, `recovery-task5-boundary`);
+> AArch64 `recovery-cross-check` not yet re-run:
 >
 > | ID | test | status |
 > | --- | --- | --- |
-> | R166 | `tests/recovery/test_freeze_entry.cc` (six `R166_*`) | RED: ③ non-alloc exception, ④ sequence exhaustion, ⑥ second request copy in runtime, ⑦ lock→watchdog fail; ①② and ⑤ already hold |
-> | R137 (lock clause) | `R137_commit_freeze_lock_failure_exits_through_watchdog_not_terminate` | RED: lock failure never reaches the watchdog stub |
-> | G1 | `tests/recovery/test_ingress_session.cc` (four `G1_*`) + `compile_fail/ingress_authorized_frame_construct.cc`, `compile_fail/ingress_handle_frame_raw.cc` | RED: codec, receive+authorize, PEER_EOF vs IO_ERROR fail against the skeleton; the two compile-fail bypasses and the `FrameOutcome` terminal alternative already hold |
+> | R166 | `tests/recovery/test_freeze_entry.cc` (six `R166_*`) | PASS against `62FE0D72…`: OOM explicit with runtime unchanged; non-alloc exception and sequence exhaustion FAIL_CLOSED; wrong phase explicit; request returned and not stored; lock failure exits through `fatal_watchdog_reboot`, not `std::terminate` |
+> | R137 (lock clause) | `R137_commit_freeze_lock_failure_exits_through_watchdog_not_terminate` | PASS against `62FE0D72…` |
+> | G1 | `tests/recovery/test_ingress_session.cc` (six `G1_*`) + `compile_fail/ingress_authorized_frame_construct.cc`, `compile_fail/ingress_handle_frame_raw.cc` | PASS against `62FE0D72…` on host: canonical frame codec, receive+authorize in one reader step, invalid/oversized/denied/revoked → `REJECTED_UNTRUSTED`, `PEER_EOF` ≠ `IO_ERROR`, both bypasses compile-fail. Target `SOCK_SEQPACKET`/registry semantics remain §19 UNVERIFIED |
 
 Scope: R1–**R165** and §19.1–§19.21. The design input is **no longer frozen**: Task 4 entered `DESIGN_BLOCKER` and the previous frozen SHA-256 `65F25A5A7CBC7E18F39ADDFA54CA0E8ACE5C6E67DEBFBA75480548EB4F215F5A` is **INVALIDATED**; see `docs/recovery/recovery-design-baseline.md` (`status = INVALIDATED / PENDING_REVIEW`). The revised design exists only as a candidate hash reported in this round's review output; it is deliberately not written into the design document, not recorded in the manifest, and must not be treated as a baseline.
 
