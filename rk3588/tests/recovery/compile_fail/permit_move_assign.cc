@@ -1,3 +1,4 @@
+// EXPECT-DIAG: use of deleted function
 #include "recovery/types.hpp"
 
 #include <utility>

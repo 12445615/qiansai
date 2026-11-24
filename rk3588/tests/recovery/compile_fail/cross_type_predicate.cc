@@ -1,3 +1,4 @@
+// EXPECT-DIAG: cannot convert.*DevicePredicateKey.*ExecutionProofKind
 #include "recovery/types.hpp"
 
 void forbidden(recovery::DevicePredicateKey device) {

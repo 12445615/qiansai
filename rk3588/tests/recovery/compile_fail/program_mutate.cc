@@ -1,3 +1,4 @@
+// EXPECT-DIAG: passing.*const.*discards qualifiers
 #include "recovery/program.hpp"
 
 int main() {

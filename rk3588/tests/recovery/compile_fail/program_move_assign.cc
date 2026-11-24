@@ -1,3 +1,4 @@
+// EXPECT-DIAG: use of deleted function
 #include "recovery/compiler.hpp"
 
 void forbidden(recovery::CompileResult left, recovery::CompileResult right) {

@@ -48,11 +48,15 @@ make_pkg libmodbus-dev arm64
 mkdir -p "$pkgroot/libmodbus-dev/usr/include/modbus" "$pkgroot/libmodbus-dev/usr/lib/aarch64-linux-gnu"
 printf 'modbus\n' >"$pkgroot/libmodbus-dev/usr/include/modbus/modbus.h"
 ln -s libmodbus.so.5 "$pkgroot/libmodbus-dev/usr/lib/aarch64-linux-gnu/libmodbus.so"
+make_pkg libssl-dev arm64
+mkdir -p "$pkgroot/libssl-dev/usr/include/openssl" "$pkgroot/libssl-dev/usr/include/aarch64-linux-gnu/openssl"
+printf 'openssl evp fixture\n' >"$pkgroot/libssl-dev/usr/include/openssl/evp.h"
+printf 'openssl config fixture\n' >"$pkgroot/libssl-dev/usr/include/aarch64-linux-gnu/openssl/opensslconf.h"
 for pkg in libcurl4-openssl-dev libcurl4 libsqlite3-dev libsqlite3-0; do
     make_pkg "$pkg" arm64
 done
 
-for pkg in libpaho-mqtt-dev libpaho-mqtt1.3 libmodbus-dev libmodbus5; do
+for pkg in libssl-dev libpaho-mqtt-dev libpaho-mqtt1.3 libmodbus-dev libmodbus5; do
     dpkg-deb --build --root-owner-group "$pkgroot/$pkg" "$tmp/packages/${pkg}_1.0_arm64.deb" >/dev/null
 done
 
@@ -67,6 +71,7 @@ bash "$project_dir/scripts/install_elf2_jammy_deps.sh" \
     --rknn-runtime "$tmp/sysroot/usr/lib/aarch64-linux-gnu/librknnrt.so"
 
 test -f "$tmp/sysroot/usr/include/MQTTClient.h"
+test -f "$tmp/sysroot/usr/include/openssl/evp.h"
 test -f "$tmp/sysroot/usr/include/modbus/modbus.h"
 test -L "$tmp/sysroot/usr/lib/aarch64-linux-gnu/libpaho-mqtt3c.so"
 test -L "$tmp/sysroot/usr/lib/aarch64-linux-gnu/libmodbus.so"

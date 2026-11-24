@@ -1,3 +1,4 @@
+// EXPECT-DIAG: is private within this context
 #include "recovery/types.hpp"
 
 namespace recovery {

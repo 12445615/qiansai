@@ -15,9 +15,9 @@ struct Inputs {
 };
 
 Inputs valid_inputs() {
-    const recovery::FaultFact fault{{7, 1}, recovery::FaultKind::PACKET_DOMAIN_FAULT,
-                                    {42, std::nullopt, std::nullopt},
-                                    {3, 4, 5, 6}, {9, {}}};
+    const recovery::FaultFact fault = recovery::RecoveryTestAccess::make_fault(
+        7, 1, {recovery::FaultKind::PACKET_DOMAIN_FAULT,
+               {42, std::nullopt, std::nullopt}, {3, 4, 5, 6}, {9, {}}});
     auto policy_contents = std::make_shared<recovery::PolicyContents>();
     policy_contents->dispositions.emplace(recovery::FaultKind::PACKET_DOMAIN_FAULT,
                                           recovery::FaultDisposition::COVERED);
@@ -34,7 +34,7 @@ Inputs valid_inputs() {
     auto registry_contents = std::make_shared<recovery::CapabilityRegistryContents>();
     const recovery::Digest empty_digest{};
     return Inputs{
-        recovery::FrozenRuntimeSnapshot{{7, 1, 99}, 2, 7, {fault},
+        recovery::FrozenRuntimeSnapshot{{7, 1, 99}, 2, 7, 0, 0, {}, {}, {}, {fault}, 0, {},
                                         {{42, recovery::ExecutorBindingStatus::RESOLVED,
                                           recovery::ExecutorPrincipal{
                                               recovery::ProcessPrincipal{{123, 456}}}, 1}},
@@ -212,6 +212,63 @@ RECOVERY_TEST(device_fault_target_outside_ledger_closure_fails_explicitly) {
     RECOVERY_CHECK(failure.predicate_failure.has_value());
     RECOVERY_CHECK_EQ(failure.predicate_failure->kind,
                       recovery::PredicateDerivationFailureKind::TARGET_NOT_IN_CLOSURE);
+}
+
+RECOVERY_TEST(R58_registry_evidence_failure_kinds_are_explicit) {
+    using namespace recovery;
+    constexpr DeviceContextIdentity device = 77;
+    constexpr CapabilityId capability = 5;
+    const CapabilityEvidence evidence{
+        capability, device, {{1}, {2}, {3}, {4}, 0}, 12, {8}, 50, 150};
+
+    const auto make_inputs = [&](std::vector<CapabilityEvidence> evidences,
+                                 std::set<EvidenceId> revoked) {
+        auto inputs = valid_inputs();
+        inputs.snapshot.fault_batch.front().subject.device_context = device;
+        inputs.snapshot.ledger_prefix.push_back(
+            FrozenGrantRecord{42, std::nullopt, {}, {{device}}});
+        auto policy = std::make_shared<PolicyContents>(*inputs.policy.contents);
+        policy->device_capability_map.emplace(device, capability);
+        policy->resource_device_proof_kind.emplace(
+            ResourceKind::PACKET_DOMAIN, DeviceProofKind::CONTEXT_DESTROY_CONFIRMED);
+        inputs.policy.contents = std::move(policy);
+        inputs.policy.digest = canonical_digest(*inputs.policy.contents);
+        auto registry = std::make_shared<CapabilityRegistryContents>();
+        registry->evidences = std::move(evidences);
+        registry->revoked_evidence = std::move(revoked);
+        inputs.registry.contents = std::move(registry);
+        inputs.registry.digest = canonical_digest(*inputs.registry.contents);
+        return inputs;
+    };
+
+    const auto missing = make_inputs({}, {});
+    const auto missing_result = RecoveryCompiler::compile(
+        missing.snapshot, missing.policy, missing.registry, 100);
+    RECOVERY_CHECK_EQ(std::get<CompileFailure>(missing_result).predicate_failure->kind,
+                      PredicateDerivationFailureKind::EVIDENCE_MISSING);
+
+    const auto revoked = make_inputs({evidence}, {evidence.evidence_id});
+    const auto revoked_result = RecoveryCompiler::compile(
+        revoked.snapshot, revoked.policy, revoked.registry, 100);
+    RECOVERY_CHECK_EQ(std::get<CompileFailure>(revoked_result).predicate_failure->kind,
+                      PredicateDerivationFailureKind::EVIDENCE_REVOKED);
+
+    auto expired_evidence = evidence;
+    expired_evidence.valid_from = 200;
+    expired_evidence.valid_until = 300;
+    const auto expired = make_inputs({expired_evidence}, {});
+    const auto expired_result = RecoveryCompiler::compile(
+        expired.snapshot, expired.policy, expired.registry, 100);
+    RECOVERY_CHECK_EQ(std::get<CompileFailure>(expired_result).predicate_failure->kind,
+                      PredicateDerivationFailureKind::EVIDENCE_EXPIRED);
+
+    auto duplicate = evidence;
+    duplicate.evidence_id++;
+    const auto ambiguous = make_inputs({evidence, duplicate}, {});
+    const auto ambiguous_result = RecoveryCompiler::compile(
+        ambiguous.snapshot, ambiguous.policy, ambiguous.registry, 100);
+    RECOVERY_CHECK_EQ(std::get<CompileFailure>(ambiguous_result).predicate_failure->kind,
+                      PredicateDerivationFailureKind::EVIDENCE_AMBIGUOUS);
 }
 
 RECOVERY_TEST(process_execution_predicate_is_derived_from_ledger_closure) {

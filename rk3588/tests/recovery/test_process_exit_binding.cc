@@ -10,9 +10,9 @@ recovery::FrozenRuntimeSnapshot snapshot_with_bindings() {
     snapshot.recovery_id = {7, 8, 9};
     snapshot.freeze_seq = 10;
     snapshot.boot_id = 7;
-    snapshot.fault_batch = {
-        {{7, 1}, recovery::FaultKind::PACKET_DOMAIN_FAULT,
-         {1, std::nullopt, std::nullopt}, {1, 2, 3, 4}, {5, {}}}};
+    snapshot.fault_batch = {recovery::RecoveryTestAccess::make_fault(
+        7, 1, {recovery::FaultKind::PACKET_DOMAIN_FAULT,
+               {1, std::nullopt, std::nullopt}, {1, 2, 3, 4}, {5, {}}})};
     snapshot.owner_executor_bindings = {
         {1, recovery::ExecutorBindingStatus::RESOLVED,
          recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{50, 500}}}, 1}};
@@ -108,12 +108,18 @@ RECOVERY_TEST(R9_snapshot_canonical_order_pins_process_bindings_between_owner_an
     recovery::canonical_write(expected, snapshot.recovery_id);
     recovery::canonical_write(expected, snapshot.freeze_seq);
     recovery::canonical_write(expected, snapshot.boot_id);
+    recovery::canonical_write(expected, snapshot.closing_generation);
+    recovery::canonical_write(expected, snapshot.grant_cutoff);
+    recovery::canonical_write(expected, snapshot.ledger_prefix);
+    recovery::canonical_write(expected, snapshot.ledger_prefix_digest);
+    recovery::canonical_write(expected, snapshot.owner_ack_canonical_digest);
     recovery::canonical_write(expected, snapshot.fault_batch);
+    recovery::canonical_write(expected, snapshot.fault_batch_cutoff);
+    recovery::canonical_write(expected, snapshot.fault_batch_digest);
     recovery::canonical_write(expected, snapshot.owner_executor_bindings);
     recovery::canonical_write(expected, snapshot.process_exit_bindings);
     recovery::canonical_write(expected, snapshot.epoch_snapshot);
     recovery::canonical_write(expected, snapshot.snapshot_digest);
-    recovery::canonical_write(expected, snapshot.ledger_prefix);
     RECOVERY_CHECK_EQ(recovery::canonical_bytes(snapshot), std::move(expected).finish());
 }
 

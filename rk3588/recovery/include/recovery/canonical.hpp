@@ -149,6 +149,7 @@ inline void canonical_write(CanonicalWriter& writer, const ProcessIdentity& valu
 }
 
 void canonical_write(CanonicalWriter&, const RecoveryInstanceId&);
+void canonical_write(CanonicalWriter&, const GrantIdentity&);
 void canonical_write(CanonicalWriter&, const ProcessExitBindingId&);
 void canonical_write(CanonicalWriter&, const ProcessExitBindingDescriptor&);
 void canonical_write(CanonicalWriter&, const FrozenRuntimeSnapshot&);

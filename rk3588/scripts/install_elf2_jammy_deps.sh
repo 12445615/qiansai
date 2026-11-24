@@ -44,6 +44,7 @@ elf2_require_dir "$freetype_include"
 elf2_require_file "$rknn_runtime"
 
 packages=(
+    'libssl-dev_*_arm64.deb'
     'libpaho-mqtt-dev_*_arm64.deb'
     'libpaho-mqtt1.3_*_arm64.deb'
     'libmodbus-dev_*_arm64.deb'

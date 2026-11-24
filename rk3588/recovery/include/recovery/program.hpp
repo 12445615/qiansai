@@ -13,6 +13,11 @@
 
 namespace recovery {
 
+class RecoveryCoordinator;
+#ifdef RECOVERY_TESTING
+struct RecoveryTestAccess;
+#endif
+
 using PolicyVersion = std::uint64_t;
 using CapabilityRegistryVersion = std::uint64_t;
 using TrustedMonotonicTime = std::uint64_t;
@@ -40,11 +45,6 @@ enum class FaultKind : std::uint32_t {
     PACKET_DOMAIN_FAULT, RTMP_SINK_FAULT, RECORD_SINK_FAULT,
     WORKER_PROCESS_EXIT, CAPABILITY_FAULT, UNKNOWN
 };
-struct FaultIdentity {
-    BootId boot_id;
-    std::uint64_t fault_seq;
-    auto operator<=>(const FaultIdentity&) const = default;
-};
 struct FaultSubject {
     ResourceInstance resource;
     std::optional<DeviceContextIdentity> device_context;
@@ -55,6 +55,25 @@ struct FaultEvidence {
     EvidenceId evidence_id;
     Digest evidence_digest;
     auto operator<=>(const FaultEvidence&) const = default;
+};
+struct FaultReport {
+    FaultKind kind;
+    FaultSubject subject;
+    EpochSnapshot observed_epochs;
+    FaultEvidence evidence;
+    auto operator<=>(const FaultReport&) const = default;
+};
+struct FaultIdentity {
+    BootId boot_id;
+    std::uint64_t fault_seq;
+    auto operator<=>(const FaultIdentity&) const = default;
+private:
+    FaultIdentity(BootId boot, std::uint64_t sequence)
+        : boot_id(boot), fault_seq(sequence) {}
+    friend class RecoveryCoordinator;
+#ifdef RECOVERY_TESTING
+    friend struct RecoveryTestAccess;
+#endif
 };
 struct FaultFact {
     FaultIdentity id;
@@ -83,6 +102,9 @@ struct FaultCoverage {
     std::vector<FaultCoverageEntry> entries;
     auto operator<=>(const FaultCoverage&) const = default;
 };
+enum class DerivationOutcome : std::uint32_t {
+    ONLINE_RECOVERY, FAIL_CLOSED, PARENT_SERVICE_RESTART, BOARD_RESTART_REQUIRED
+};
 struct RecoveryResourcePlan {
     ResourceInstance resource;
     ResourceKind resource_kind;
@@ -90,6 +112,12 @@ struct RecoveryResourcePlan {
     EpochSnapshot old_epochs;
     std::set<EpochDomain> invalidated_domains;
     auto operator<=>(const RecoveryResourcePlan&) const = default;
+};
+struct RecoveryPlanDerivation {
+    DerivationOutcome outcome;
+    std::vector<RecoveryResourcePlan> resource_plans;
+    FaultCoverage fault_coverage;
+    std::optional<FallbackAction> fallback;
 };
 enum class ExecutorBindingStatus : std::uint32_t { RESOLVED, AMBIGUOUS, UNAUTHENTICATABLE };
 struct OwnerExecutorBinding {
@@ -108,18 +136,38 @@ struct FrozenGrantRecord {
     std::optional<ResourceInstance> destination;
     std::set<SubjectIdentity> execution_targets;
     std::set<DeviceTarget> device_targets;
+    GrantIdentity identity{};
+    OwnerId owner{};
+    std::optional<LeaseIdentity> lease{};
     auto operator<=>(const FrozenGrantRecord&) const = default;
+};
+struct OwnerSnapshotAck {
+    RecoveryInstanceId recovery_id;
+    FreezeSeq freeze_seq;
+    BootId boot_id;
+    AdmissionGeneration closing_generation;
+    OwnerId owner;
+    std::set<GrantIdentity> locally_observed_grants;
+    std::set<LeaseIdentity> outstanding_leases;
+    Digest local_view_digest;
+    auto operator<=>(const OwnerSnapshotAck&) const = default;
 };
 struct FrozenRuntimeSnapshot {
     RecoveryInstanceId recovery_id;
     FreezeSeq freeze_seq;
     BootId boot_id;
+    AdmissionGeneration closing_generation{};
+    GrantSeq grant_cutoff{};
+    std::vector<FrozenGrantRecord> ledger_prefix{};
+    Digest ledger_prefix_digest{};
+    Digest owner_ack_canonical_digest{};
     std::vector<FaultFact> fault_batch;
+    std::uint64_t fault_batch_cutoff{};
+    Digest fault_batch_digest{};
     std::vector<OwnerExecutorBinding> owner_executor_bindings;
     std::vector<ProcessExitBindingDescriptor> process_exit_bindings;
     EpochSnapshot epoch_snapshot;
     Digest snapshot_digest;
-    std::vector<FrozenGrantRecord> ledger_prefix{};
 };
 
 enum class OperationKind : std::uint32_t {
@@ -201,6 +249,7 @@ struct CapabilityRegistrySnapshot {
 struct ExecutionPredicate {
     PredicateKey key;
     ExecutionProofKind required_kind;
+    ProofIssuer required_issuer;
     SubjectIdentity expected_subject;
     EpochMask epoch_mask;
     std::optional<ProcessExitBindingId> expected_process_binding;
@@ -220,6 +269,7 @@ struct CapabilityExpectation {
 struct DevicePredicate {
     PredicateKey key;
     DeviceProofKind required_kind;
+    ProofIssuer required_issuer;
     DeviceContextIdentity expected_device_context;
     DeviceTarget expected_target;
     EpochMask epoch_mask;
@@ -267,6 +317,9 @@ struct CompileFailure {
 };
 
 class RecoveryCompiler;
+#ifdef RECOVERY_TESTING
+class ValidatedRecoveryProgramTestAccess;
+#endif
 class ValidatedRecoveryProgram {
 public:
     const RecoveryInstanceId& recovery_id() const noexcept { return recovery_id_; }
@@ -290,6 +343,9 @@ public:
     ValidatedRecoveryProgram& operator=(ValidatedRecoveryProgram&&) = delete;
 private:
     friend class RecoveryCompiler;
+#ifdef RECOVERY_TESTING
+    friend class ValidatedRecoveryProgramTestAccess;
+#endif
     RecoveryInstanceId recovery_id_;
     FreezeSeq freeze_seq_;
     BootId boot_id_;
@@ -313,10 +369,15 @@ private:
 };
 
 using CompileResult = std::variant<ValidatedRecoveryProgram, CompileFailure>;
+
+RecoveryPlanDerivation derive_resource_plans(
+    const FrozenRuntimeSnapshot&, const std::vector<FaultFact>&,
+    const PolicySnapshot&);
 [[nodiscard]] Digest compute_transaction_hash(const ValidatedRecoveryProgram& program);
 
 #define RECOVERY_CANONICAL_STRUCT(type, ...) \
     inline void canonical_write(CanonicalWriter& writer, const type& value) { __VA_ARGS__ }
+inline void canonical_write(CanonicalWriter&, const ProofIssuer&);
 RECOVERY_CANONICAL_STRUCT(EpochSnapshot,
     canonical_write(writer, value.stream_epoch); canonical_write(writer, value.ai_epoch);
     canonical_write(writer, value.worker_epoch); canonical_write(writer, value.media_epoch);)
@@ -336,11 +397,12 @@ RECOVERY_CANONICAL_STRUCT(PolicyContents, canonical_write(writer, value.recipes)
 RECOVERY_CANONICAL_STRUCT(EnvironmentFingerprint, canonical_write(writer, value.bsp_fingerprint); canonical_write(writer, value.kernel_build_id); canonical_write(writer, value.driver_version); canonical_write(writer, value.firmware_version); canonical_write(writer, value.api_mode);)
 RECOVERY_CANONICAL_STRUCT(CapabilityEvidence, canonical_write(writer, value.capability_id); canonical_write(writer, value.device_context); canonical_write(writer, value.environment); canonical_write(writer, value.evidence_id); canonical_write(writer, value.evidence_digest); canonical_write(writer, value.valid_from); canonical_write(writer, value.valid_until);)
 RECOVERY_CANONICAL_STRUCT(CapabilityRegistryContents, canonical_write(writer, value.evidences); canonical_write(writer, value.revoked_evidence);)
-RECOVERY_CANONICAL_STRUCT(ExecutionPredicate, canonical_write(writer, value.key); canonical_write(writer, value.required_kind); canonical_write(writer, value.expected_subject); canonical_write(writer, value.epoch_mask); canonical_write(writer, value.expected_process_binding); canonical_write(writer, value.expected_spawn_generation);)
+RECOVERY_CANONICAL_STRUCT(ExecutionPredicate, canonical_write(writer, value.key); canonical_write(writer, value.required_kind); canonical_write(writer, value.required_issuer); canonical_write(writer, value.expected_subject); canonical_write(writer, value.epoch_mask); canonical_write(writer, value.expected_process_binding); canonical_write(writer, value.expected_spawn_generation);)
 RECOVERY_CANONICAL_STRUCT(CapabilityExpectation, canonical_write(writer, value.capability_id); canonical_write(writer, value.device_context); canonical_write(writer, value.environment); canonical_write(writer, value.evidence_id); canonical_write(writer, value.evidence_digest); canonical_write(writer, value.valid_from); canonical_write(writer, value.valid_until);)
 RECOVERY_CANONICAL_STRUCT(DeviceTarget, canonical_write(writer, value.device_context);)
-RECOVERY_CANONICAL_STRUCT(FrozenGrantRecord, canonical_write(writer, value.source); canonical_write(writer, value.destination); canonical_write(writer, value.execution_targets); canonical_write(writer, value.device_targets);)
-RECOVERY_CANONICAL_STRUCT(DevicePredicate, canonical_write(writer, value.key); canonical_write(writer, value.required_kind); canonical_write(writer, value.expected_device_context); canonical_write(writer, value.expected_target); canonical_write(writer, value.epoch_mask); canonical_write(writer, value.expected_capability);)
+RECOVERY_CANONICAL_STRUCT(FrozenGrantRecord, canonical_write(writer, value.source); canonical_write(writer, value.destination); canonical_write(writer, value.execution_targets); canonical_write(writer, value.device_targets); canonical_write(writer, value.identity); canonical_write(writer, value.owner); canonical_write(writer, value.lease);)
+RECOVERY_CANONICAL_STRUCT(OwnerSnapshotAck, canonical_write(writer, value.recovery_id); canonical_write(writer, value.freeze_seq); canonical_write(writer, value.boot_id); canonical_write(writer, value.closing_generation); canonical_write(writer, value.owner); canonical_write(writer, value.locally_observed_grants); canonical_write(writer, value.outstanding_leases); canonical_write(writer, value.local_view_digest);)
+RECOVERY_CANONICAL_STRUCT(DevicePredicate, canonical_write(writer, value.key); canonical_write(writer, value.required_kind); canonical_write(writer, value.required_issuer); canonical_write(writer, value.expected_device_context); canonical_write(writer, value.expected_target); canonical_write(writer, value.epoch_mask); canonical_write(writer, value.expected_capability);)
 #undef RECOVERY_CANONICAL_STRUCT
 
 inline void canonical_write(CanonicalWriter& writer, const ThreadIdentity& value) {
@@ -351,6 +413,9 @@ inline void canonical_write(CanonicalWriter& writer, const ExecutionPredicateKey
 }
 inline void canonical_write(CanonicalWriter& writer, const DevicePredicateKey& value) {
     canonical_write(writer, value.kind); canonical_write(writer, value.device_context);
+}
+inline void canonical_write(CanonicalWriter& writer, const ProofIssuer& value) {
+    canonical_write(writer, value.id); canonical_write(writer, value.role);
 }
 inline void canonical_write(CanonicalWriter& writer, const OwnerExecutorBinding& value) {
     canonical_write(writer, value.resource); canonical_write(writer, value.status);

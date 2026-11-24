@@ -9,13 +9,20 @@ mkdir -p "${work_dir}"
 
 expect_failure() {
     local source=$1
-    local pattern=$2
+    local pattern
+    pattern=$(sed -n 's@^// EXPECT-DIAG: @@p' "${source}")
+    if [[ -z "${pattern}" ]]; then
+        echo "FAIL: missing EXPECT-DIAG: ${source}" >&2
+        return 1
+    fi
     local log="${work_dir}/$(basename "${source}").log"
     if "${cxx}" "${flags[@]}" -c "${source}" -o "${work_dir}/forbidden.o" >"${log}" 2>&1; then
         echo "FAIL: expected compilation failure: ${source}" >&2
         return 1
     fi
-    if ! grep -Eiq "${pattern}" "${log}"; then
+    local first_error
+    first_error=$(grep -m1 -E 'error:' "${log}" || true)
+    if [[ -z "${first_error}" ]] || ! grep -Eiq "${pattern}" <<<"${first_error}"; then
         echo "FAIL: compilation failed for an unexpected reason: ${source}" >&2
         sed -n '1,120p' "${log}" >&2
         return 1
@@ -23,11 +30,6 @@ expect_failure() {
     echo "PASS: expected compile-time rejection: $(basename "${source}")"
 }
 
-expect_failure "${root_dir}/tests/recovery/compile_fail/permit_move_assign.cc" 'deleted.*operator=|operator=.*deleted|use of deleted function'
-expect_failure "${root_dir}/tests/recovery/compile_fail/cross_type_predicate.cc" 'no matching function|no matching constructor|cannot convert|could not convert'
-expect_failure "${root_dir}/tests/recovery/compile_fail/variant_too_many_alternatives.cc" 'canonical variant index exceeds one byte'
-expect_failure "${root_dir}/tests/recovery/compile_fail/permit_test_access_forge.cc" 'PermitHandle.*private|is private within this context'
-expect_failure "${root_dir}/tests/recovery/compile_fail/program_construct.cc" 'ValidatedRecoveryProgram.*private|is private within this context|no matching function'
-expect_failure "${root_dir}/tests/recovery/compile_fail/program_mutate.cc" 'discard.*qualifier|passing.*const|read-only|no matching function'
-expect_failure "${root_dir}/tests/recovery/compile_fail/program_move_assign.cc" 'deleted.*operator=|operator=.*deleted|use of deleted function'
-expect_failure "${root_dir}/tests/recovery/compile_fail/compiler_fifth_argument.cc" 'no matching function|candidate expects 4 arguments|too many arguments'
+for source in "${root_dir}"/tests/recovery/compile_fail/*.cc; do
+    expect_failure "${source}"
+done

@@ -1,3 +1,4 @@
+// EXPECT-DIAG: no matching function for call to
 #include "recovery/compiler.hpp"
 
 void forbidden(const recovery::FrozenRuntimeSnapshot& snapshot,

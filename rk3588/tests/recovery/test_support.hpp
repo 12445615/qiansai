@@ -1,11 +1,31 @@
 #ifndef RECOVERY_TEST_SUPPORT_HPP
 #define RECOVERY_TEST_SUPPORT_HPP
 
+#include "recovery/program.hpp"
+
 #include <exception>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef RECOVERY_TESTING
+namespace recovery {
+
+struct RecoveryTestAccess {
+    static FaultFact make_fault(BootId boot, std::uint64_t sequence,
+                                const FaultReport& report) {
+        return {FaultIdentity{boot, sequence}, report.kind, report.subject,
+                report.observed_epochs, report.evidence};
+    }
+    static void clear_fault_batch(RecoveryCoordinator&);
+    static void set_fault_batch(RecoveryCoordinator&, std::vector<FaultFact>);
+    static void set_fault_seq_counter(RecoveryCoordinator&, std::uint64_t);
+    static std::uint64_t fault_seq_counter(const RecoveryCoordinator&);
+};
+
+}  // namespace recovery
+#endif
 
 namespace recovery::test {
 

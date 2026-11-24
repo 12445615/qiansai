@@ -5,7 +5,7 @@ repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 authoritative_path=/mnt/e/Obsidian_warehouse/嵌入式/1-Project/RK3588工业安全监测/2026-11-02-DMA-BUF恢复与证明内核设计.md
 design_doc=${RECOVERY_DESIGN_DOC:-$authoritative_path}
 manifest="$repo_dir/docs/recovery/recovery-design-baseline.md"
-expected_sha=8B7C5DFD8AE8753CA05A06D130EC995735AB2B89B068861745B14BF5A265D9A8
+expected_sha=9CE846BAA5EF14C941B07DC6C6D9848273B17FBAA268A1AE03DBE33808FECAA7
 
 fail() {
     echo "FAIL: $*" >&2

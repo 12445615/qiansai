@@ -1,3 +1,4 @@
+// EXPECT-DIAG: canonical variant index exceeds one byte
 #include "recovery/canonical.hpp"
 
 void forbidden() {

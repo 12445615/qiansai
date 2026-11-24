@@ -14,17 +14,28 @@ using TransactionHash = Digest;
 using BootId = std::uint64_t;
 using RecoverySeq = std::uint64_t;
 using FreezeSeq = std::uint64_t;
+using AdmissionGeneration = std::uint64_t;
+using GrantSeq = std::uint64_t;
+using LeaseIdentity = std::uint64_t;
+using OwnerId = std::uint64_t;
 using ProcessExitBindingSeq = std::uint64_t;
 using ProcessId = std::uint64_t;
 using ThreadId = std::uint64_t;
 using ActionId = std::uint64_t;
 using DeviceContextIdentity = std::uint64_t;
+using IssuerId = std::uint64_t;
 
 struct RecoveryInstanceId {
     BootId boot_id;
     RecoverySeq recovery_seq;
     std::uint64_t nonce;
     auto operator<=>(const RecoveryInstanceId&) const = default;
+};
+struct GrantIdentity {
+    BootId boot_id;
+    AdmissionGeneration admission_generation;
+    GrantSeq seq;
+    auto operator<=>(const GrantIdentity&) const = default;
 };
 
 struct ThreadIdentity {
@@ -62,6 +73,18 @@ struct ProcessPrincipal {
 
 struct CoordinatorPrincipal {
     auto operator<=>(const CoordinatorPrincipal&) const = default;
+};
+
+enum class IssuerRole : std::uint32_t {
+    EXECUTION_AGENT,
+    DEVICE_DRIVER,
+    COORDINATOR,
+};
+
+struct ProofIssuer {
+    IssuerId id;
+    IssuerRole role;
+    bool operator==(const ProofIssuer&) const = default;
 };
 
 using ExecutorPrincipal = std::variant<ProcessPrincipal, CoordinatorPrincipal>;

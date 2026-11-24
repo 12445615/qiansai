@@ -42,19 +42,19 @@ recovery-cross-check:
 		$(ROOT_DIR)/tests/test_recovery_digest_probe.sh
 
 recovery-task4-boundary:
-	@if rg -n '#include[[:space:]]*<(sys/wait\.h|poll\.h)>|\b(waitid|poll)[[:space:]]*\(' \
+	@if grep -En '#include[[:space:]]*<(sys/wait\.h|poll\.h)>|\b(waitid|poll)[[:space:]]*\(' \
 		$(RECOVERY_INCLUDE_DIR)/recovery/runtime.hpp $(RECOVERY_SOURCE_DIR)/runtime.cc; then \
 		echo "FAIL: Task 5 observation primitive leaked into Task 4 runtime" >&2; exit 1; \
 	else \
 		echo "PASS: Task 4 runtime contains no waitid/poll/<sys/wait.h>"; \
 	fi
 	@if sed -n '/struct RecoveryInstanceRuntime/,/^};/p' $(RECOVERY_INCLUDE_DIR)/recovery/runtime.hpp \
-		| rg -n 'fault_batch_open|fault_batch_cutoff|fault_batch_digest'; then \
+		| grep -En 'fault_batch_open|fault_batch_cutoff|fault_batch_digest'; then \
 		echo "FAIL: duplicate fault-batch close state remains in RecoveryInstanceRuntime" >&2; exit 1; \
 	else \
 		echo "PASS: RecoveryInstanceRuntime has only the collecting fault_batch"; \
 	fi
-	@if rg -n 'FaultReportToken|ReporterId|last_report_seq|fault_content_digest' \
+	@if grep -REn 'FaultReportToken|ReporterId|last_report_seq|fault_content_digest' \
 		$(RECOVERY_INCLUDE_DIR)/recovery $(RECOVERY_SOURCE_DIR); then \
 		echo "FAIL: deleted replay/dedup kernel state remains in recovery sources" >&2; exit 1; \
 	else \
@@ -62,13 +62,13 @@ recovery-task4-boundary:
 	fi
 
 recovery-task5-boundary:
-	@if rg -n '#include[[:space:]]*<(sys/wait\.h|poll\.h)>|\b(waitid|poll)[[:space:]]*\(' \
-		$(RECOVERY_SOURCE_DIR) --glob '!proof.cc'; then \
+	@if grep -REn --exclude=proof.cc '#include[[:space:]]*<(sys/wait\.h|poll\.h)>|\b(waitid|poll)[[:space:]]*\(' \
+		$(RECOVERY_SOURCE_DIR); then \
 		echo "FAIL: process-exit observation primitive leaked outside proof.cc" >&2; exit 1; \
 	else \
 		echo "PASS: waitid/poll are isolated to proof.cc"; \
 	fi
-	@if ! rg -n '#include[[:space:]]*<(sys/wait\.h|poll\.h)>|\b(waitid|poll)[[:space:]]*\(' \
+	@if ! grep -En '#include[[:space:]]*<(sys/wait\.h|poll\.h)>|\b(waitid|poll)[[:space:]]*\(' \
 		$(RECOVERY_SOURCE_DIR)/proof.cc; then \
 		echo "FAIL: proof.cc does not own the process-exit observation primitive" >&2; exit 1; \
 	else \
