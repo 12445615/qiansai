@@ -4,13 +4,20 @@
 #include "recovery/program.hpp"
 
 #include <exception>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #ifdef RECOVERY_TESTING
 namespace recovery {
+
+class OwnedFd;
+class FaultIngressSession;
+class FaultIngressSessionIo;
+struct FaultSourceRegistration;
 
 struct RecoveryTestAccess {
     static FaultFact make_fault(BootId boot, std::uint64_t sequence,
@@ -22,6 +29,11 @@ struct RecoveryTestAccess {
     static void set_fault_batch(RecoveryCoordinator&, std::vector<FaultFact>);
     static void set_fault_seq_counter(RecoveryCoordinator&, std::uint64_t);
     static std::uint64_t fault_seq_counter(const RecoveryCoordinator&);
+    static FreezeSeq freeze_seq(const RecoveryCoordinator&);
+    static void set_freeze_seq(RecoveryCoordinator&, FreezeSeq);
+    static FaultIngressSession make_fault_session(
+        OwnedFd connection, std::shared_ptr<const FaultSourceRegistration>);
+    static const FaultIngressSessionIo& session_io();
 };
 
 }  // namespace recovery
@@ -33,6 +45,13 @@ template <typename Value>
 concept StreamInsertable = requires(std::ostream& output, const Value& value) {
     output << value;
 };
+
+// A result variant whose first alternative is the success value, e.g.
+// BeginFreezeResult = variant<FreezeRequest, BeginFreezeError>.
+template <typename... Alternatives>
+[[nodiscard]] bool succeeded(const std::variant<Alternatives...>& result) {
+    return result.index() == 0;
+}
 
 using TestFunction = void (*)();
 

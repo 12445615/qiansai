@@ -204,11 +204,14 @@ RecoveryCoordinator::prepare_fault_batch_close() const {
     return prepared;
 }
 
-bool RecoveryCoordinator::begin_freeze(
+// Task 4F RED skeleton: only the return type follows §6.1; the R166 behaviour
+// (error-code mapping, sequence exhaustion, lock watchdog) is not yet implemented.
+BeginFreezeResult RecoveryCoordinator::begin_freeze(
     const std::vector<FrozenGrantRecord>& ledger,
     const std::vector<OwnerExecutorBinding>& owner_bindings) noexcept {
     std::scoped_lock guard{mutex_};
-    if (slot_.state != RecoverySlotState::PREPARING || !slot_.active) return false;
+    if (slot_.state != RecoverySlotState::PREPARING || !slot_.active)
+        return BeginFreezeError{BeginFreezeErrorCode::WRONG_PHASE};
     try {
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::BEGIN_FREEZE_PREPARE);
@@ -232,12 +235,12 @@ bool RecoveryCoordinator::begin_freeze(
         slot_.active->owner_executor_bindings = std::move(prepared_bindings);
         slot_.active->grant_cutoff = prepared_cutoff;
         slot_.active->ledger_prefix_digest = prepared_digest;
-        slot_.active->freeze_request = std::move(prepared_request);
+        slot_.active->freeze_request = prepared_request;
         slot_.freeze_seq = prepared_freeze_seq;
         slot_.state = RecoverySlotState::FREEZING;
-        return true;
+        return prepared_request;
     }
-    catch (...) { return false; }
+    catch (...) { return BeginFreezeError{BeginFreezeErrorCode::ALLOCATION_FAILED}; }
 }
 
 bool RecoveryCoordinator::commit_freeze() noexcept {

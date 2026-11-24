@@ -27,7 +27,7 @@ RECOVERY_TEST(R11_report_fault_and_commit_freeze_are_mutex_linearized) {
     for (unsigned round = 0; round < 100; ++round) {
         recovery::RecoveryCoordinator coordinator{7};
         RECOVERY_CHECK(coordinator.report_fault(fault(1)));
-        RECOVERY_CHECK(coordinator.begin_freeze({}, owners()));
+        RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({}, owners())));
         std::thread reporter([&] { (void)coordinator.report_fault(fault(2)); });
         std::thread committer([&] { (void)coordinator.commit_freeze(); });
         reporter.join(); committer.join();
@@ -49,7 +49,7 @@ RECOVERY_TEST(R11_report_fault_and_commit_freeze_are_mutex_linearized) {
 RECOVERY_TEST(R40_missing_owner_ack_fails_closed_without_snapshot) {
     recovery::RecoveryCoordinator coordinator{7};
     RECOVERY_CHECK(coordinator.report_fault(fault(1)));
-    RECOVERY_CHECK(coordinator.begin_freeze({grant(55)}));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({grant(55)})));
     RECOVERY_CHECK(!coordinator.commit_freeze());
     RECOVERY_CHECK_EQ(coordinator.state(), recovery::RecoverySlotState::FAIL_CLOSED);
     RECOVERY_CHECK(!coordinator.active().current_snapshot.has_value());
@@ -59,7 +59,7 @@ RECOVERY_TEST(R40_missing_owner_ack_fails_closed_without_snapshot) {
 RECOVERY_TEST(R40_owner_snapshot_ack_exact_validation_and_complete_set) {
     recovery::RecoveryCoordinator coordinator{7};
     RECOVERY_CHECK(coordinator.report_fault(fault(1)));
-    RECOVERY_CHECK(coordinator.begin_freeze({grant(55)}, owners()));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({grant(55)}, owners())));
     const auto valid = ack_for(coordinator, 55);
     const auto rejected = [&](auto mutate) {
         auto candidate = valid;
@@ -94,7 +94,7 @@ RECOVERY_TEST(R10_R14_fault_batch_is_canonical_and_closed) {
     RECOVERY_CHECK_EQ(coordinator.active().fault_batch[0].id.fault_seq, 1U);
     RECOVERY_CHECK_EQ(coordinator.active().fault_batch[1].id.fault_seq, 2U);
     RECOVERY_CHECK_EQ(coordinator.active().fault_batch[2].id.fault_seq, 3U);
-    RECOVERY_CHECK(coordinator.begin_freeze({}, owners()));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({}, owners())));
     RECOVERY_CHECK(coordinator.commit_freeze());
     RECOVERY_CHECK_EQ(coordinator.active().current_snapshot->fault_batch,
                       coordinator.active().fault_batch);

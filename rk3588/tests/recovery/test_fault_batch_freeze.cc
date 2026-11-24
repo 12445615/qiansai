@@ -51,7 +51,7 @@ RECOVERY_TEST(R165_identical_reports_are_two_new_kernel_facts) {
     RECOVERY_CHECK_EQ(coordinator.active().fault_batch[1].id.fault_seq, 2U);
     RECOVERY_CHECK(coordinator.active().fault_batch[0].id
                    != coordinator.active().fault_batch[1].id);
-    RECOVERY_CHECK(coordinator.begin_freeze({}));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({})));
     RECOVERY_CHECK(coordinator.commit_freeze());
     RECOVERY_CHECK_EQ(coordinator.active().current_snapshot->fault_batch,
                       coordinator.active().fault_batch);
@@ -63,7 +63,7 @@ RECOVERY_TEST(R165_identical_reports_are_two_new_kernel_facts) {
 RECOVERY_TEST(R165_frozen_snapshot_is_unchanged_when_identical_report_is_rejected) {
     recovery::RecoveryCoordinator coordinator{7};
     RECOVERY_CHECK(coordinator.report_fault(report()));
-    RECOVERY_CHECK(coordinator.begin_freeze({}));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({})));
     RECOVERY_CHECK(coordinator.commit_freeze());
     const auto snapshot = *coordinator.active().current_snapshot;
     RECOVERY_CHECK(!coordinator.report_fault(report()));
@@ -80,7 +80,7 @@ RECOVERY_TEST(R165_empty_batch_fails_closed_without_publication) {
     RECOVERY_CHECK(coordinator.report_fault(report()));
     const auto original_counter = recovery::RecoveryTestAccess::fault_seq_counter(coordinator);
     recovery::RecoveryTestAccess::clear_fault_batch(coordinator);
-    RECOVERY_CHECK(coordinator.begin_freeze({}));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({})));
     RECOVERY_CHECK(!coordinator.commit_freeze());
     RECOVERY_CHECK_EQ(coordinator.state(), recovery::RecoverySlotState::FAIL_CLOSED);
     RECOVERY_CHECK(coordinator.active().fault_batch.empty());
@@ -96,7 +96,7 @@ RECOVERY_TEST(R165_duplicate_identity_in_collecting_batch_fails_closed) {
     const auto first = recovery::RecoveryTestAccess::make_fault(7, 1, report());
     const auto duplicate = recovery::RecoveryTestAccess::make_fault(7, 1, report());
     recovery::RecoveryTestAccess::set_fault_batch(coordinator, {first, duplicate});
-    RECOVERY_CHECK(coordinator.begin_freeze({}));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({})));
     RECOVERY_CHECK(!coordinator.commit_freeze());
     RECOVERY_CHECK_EQ(coordinator.state(), recovery::RecoverySlotState::FAIL_CLOSED);
     RECOVERY_CHECK(!coordinator.active().current_snapshot.has_value());
@@ -119,7 +119,7 @@ RECOVERY_TEST(R165_phase_a_failures_preserve_batch_counter_and_publication) {
         RECOVERY_CHECK(coordinator.report_fault(report()));
         const auto batch = coordinator.active().fault_batch;
         const auto counter = recovery::RecoveryTestAccess::fault_seq_counter(coordinator);
-        RECOVERY_CHECK(coordinator.begin_freeze({}));
+        RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({})));
         RECOVERY_CHECK(!coordinator.commit_freeze());
         RECOVERY_CHECK_EQ(coordinator.state(), recovery::RecoverySlotState::FAIL_CLOSED);
         RECOVERY_CHECK_EQ(coordinator.active().fault_batch, batch);

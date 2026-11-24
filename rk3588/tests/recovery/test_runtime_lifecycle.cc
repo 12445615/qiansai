@@ -81,9 +81,9 @@ LifecycleInputs v4l2_compiling_coordinator() {
     in.policy = {2, recovery::canonical_digest(*policy), policy};
     in.registry = {3, recovery::canonical_digest(*registry), registry};
     RECOVERY_CHECK(in.coordinator->report_fault(f));
-    RECOVERY_CHECK(in.coordinator->begin_freeze({},
+    RECOVERY_CHECK(recovery::test::succeeded(in.coordinator->begin_freeze({},
         {{1, recovery::ExecutorBindingStatus::RESOLVED,
-          recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}}));
+          recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}})));
     RECOVERY_CHECK(in.coordinator->commit_freeze());
     RECOVERY_CHECK(in.coordinator->begin_compile(in.policy, in.registry));
     return in;
@@ -107,9 +107,9 @@ LifecycleInputs compiling_coordinator(recovery::RuntimeFailureProvider* provider
     in.policy = {2, recovery::canonical_digest(*policy), policy};
     in.registry = {3, recovery::canonical_digest(*registry), registry};
     RECOVERY_CHECK(in.coordinator->report_fault(f));
-    RECOVERY_CHECK(in.coordinator->begin_freeze({},
+    RECOVERY_CHECK(recovery::test::succeeded(in.coordinator->begin_freeze({},
         {{1, recovery::ExecutorBindingStatus::RESOLVED,
-          recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}}));
+          recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}})));
     RECOVERY_CHECK(in.coordinator->commit_freeze());
     RECOVERY_CHECK(in.coordinator->begin_compile(in.policy, in.registry));
     return in;
@@ -147,7 +147,7 @@ RECOVERY_TEST(R137_runtime_failure_matrix_preserves_prepublication_state) {
         const std::vector<recovery::OwnerExecutorBinding> bindings{
             {1, recovery::ExecutorBindingStatus::RESOLVED,
              recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 1}}}, 1}};
-        RECOVERY_CHECK(!c.begin_freeze(ledger, bindings));
+        RECOVERY_CHECK(!recovery::test::succeeded(c.begin_freeze(ledger, bindings)));
         RECOVERY_CHECK_EQ(c.state(), recovery::RecoverySlotState::PREPARING);
         RECOVERY_CHECK(c.active().ledger_prefix.empty());
         RECOVERY_CHECK(c.active().owner_executor_bindings.empty());
@@ -157,7 +157,7 @@ RECOVERY_TEST(R137_runtime_failure_matrix_preserves_prepublication_state) {
         ThrowAt failure{recovery::RuntimeFailureStage::BEGIN_COMPILE_PUBLISH};
         failure.enabled = false;
         recovery::RecoveryCoordinator c{11, nullptr, &failure};
-        RECOVERY_CHECK(c.report_fault(f)); RECOVERY_CHECK(c.begin_freeze({}));
+        RECOVERY_CHECK(c.report_fault(f)); RECOVERY_CHECK(recovery::test::succeeded(c.begin_freeze({})));
         RECOVERY_CHECK(c.commit_freeze());
         failure.enabled = true;
         RECOVERY_CHECK(!c.begin_compile());
@@ -194,9 +194,9 @@ RECOVERY_TEST(runtime_failure_injection_before_freeze_publication_leaves_no_snap
         recovery::FaultReport f{recovery::FaultKind::PACKET_DOMAIN_FAULT,
                               {1, std::nullopt, std::nullopt}, {1,2,3,4}, {1,{}}};
         RECOVERY_CHECK(coordinator.report_fault(f));
-        RECOVERY_CHECK(coordinator.begin_freeze({},
+        RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({},
             {{1, recovery::ExecutorBindingStatus::RESOLVED,
-              recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}}));
+              recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}})));
         RECOVERY_CHECK(!coordinator.commit_freeze());
         RECOVERY_CHECK_EQ(coordinator.state(), recovery::RecoverySlotState::FAIL_CLOSED);
         RECOVERY_CHECK(!coordinator.active().current_snapshot.has_value());

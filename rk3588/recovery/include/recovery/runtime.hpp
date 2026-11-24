@@ -20,8 +20,12 @@ enum class RuntimeFailureStage : std::uint32_t {
     FREEZE_TARGETS, FREEZE_OWNER_ACK, FREEZE_PREFIX_DIGEST,
     FREEZE_BATCH_PREPARE, FREEZE_BATCH_DIGEST, FREEZE_AFTER_BINDINGS,
     FREEZE_BINDING_LEGALITY, FREEZE_SNAPSHOT, FREEZE_SNAPSHOT_DIGEST,
-    BEGIN_COMPILE_PUBLISH, FINISH_COMPILE_INSTALL, SEAL_PUBLISH
+    BEGIN_COMPILE_PUBLISH, FINISH_COMPILE_INSTALL, SEAL_PUBLISH,
+    BEGIN_FREEZE_LOCK, FREEZE_LOCK
 };
+// Exit code of the test watchdog stub: a lock-acquire failure must end the
+// process here, never through std::terminate (R166 ⑦, R167).
+inline constexpr int kRecoveryTestWatchdogExitCode = 86;
 class RuntimeFailureProvider {
 public:
     virtual ~RuntimeFailureProvider() = default;
@@ -62,6 +66,11 @@ struct FreezeRequest {
     Digest ledger_prefix_digest;
     auto operator<=>(const FreezeRequest&) const = default;
 };
+enum class BeginFreezeErrorCode : std::uint8_t {
+    WRONG_PHASE, SEQUENCE_EXHAUSTED, ALLOCATION_FAILED, OWNER_BINDING_INVALID, INTERNAL_FAILURE
+};
+struct BeginFreezeError final { BeginFreezeErrorCode code; };
+using BeginFreezeResult = std::variant<FreezeRequest, BeginFreezeError>;
 using ProcessExitBindingRegistry =
     std::map<ProcessExitBindingId, OwnedProcessExitBinding>;
 
@@ -128,7 +137,7 @@ public:
     RecoveryCoordinator(BootId, ProcessExitKernel*, RuntimeFailureProvider*);
 #endif
     [[nodiscard]] bool report_fault(const FaultReport&) noexcept;
-    [[nodiscard]] bool begin_freeze(
+    [[nodiscard]] BeginFreezeResult begin_freeze(
         const std::vector<FrozenGrantRecord>&,
         const std::vector<OwnerExecutorBinding>& = {}) noexcept;
     [[nodiscard]] bool commit_freeze() noexcept;
