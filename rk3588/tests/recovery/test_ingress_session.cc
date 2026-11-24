@@ -28,7 +28,9 @@ using Access = recovery::RecoveryTestAccess;
 constexpr recovery::ResourceInstance kAllowedResource = 1;
 constexpr recovery::ResourceInstance kDeniedResource = 2;
 
-std::shared_ptr<const recovery::FaultSourceRegistration> registration() {
+std::shared_ptr<const recovery::FaultSourceRegistration> registration(
+    std::shared_ptr<const recovery::FaultSourceRevocationState> revocation =
+        std::make_shared<const recovery::FaultSourceRevocationState>()) {
     auto policy = recovery::FaultSourcePolicySnapshot::create(
         {{recovery::FaultKind::PACKET_DOMAIN_FAULT, kAllowedResource}});
     RECOVERY_CHECK(std::holds_alternative<
@@ -37,7 +39,7 @@ std::shared_ptr<const recovery::FaultSourceRegistration> registration() {
         recovery::FaultSourceRegistration{
             {7}, {{}, {7}, {4242, 99}},
             std::get<std::shared_ptr<const recovery::FaultSourcePolicySnapshot>>(policy),
-            std::make_shared<const recovery::FaultSourceRevocationState>()});
+            std::move(revocation)});
 }
 
 recovery::FaultFrame frame(recovery::ResourceInstance resource, std::uint8_t delivery) {
@@ -128,6 +130,42 @@ RECOVERY_TEST(G1_reader_authorizes_inside_receive_and_rejection_is_terminal) {
 
     const auto second = io.read_authorized(session);
     RECOVERY_CHECK(terminal_of(second) == SessionTerminalCode::REJECTED_UNTRUSTED);
+}
+
+RECOVERY_TEST(G1_untrusted_bytes_and_revocation_end_the_session_as_rejected) {
+    const auto& io = Access::session_io();
+    {
+        auto pair = seqpacket_pair();
+        auto session = Access::make_fault_session(std::move(pair.local), registration());
+        const std::uint8_t garbage[] = {1, 2, 3};
+        RECOVERY_CHECK_EQ(::send(pair.peer.get(), garbage, sizeof garbage, MSG_NOSIGNAL),
+                          static_cast<ssize_t>(sizeof garbage));
+        RECOVERY_CHECK(terminal_of(io.read_authorized(session))
+                       == SessionTerminalCode::REJECTED_UNTRUSTED);
+    }
+    {
+        // Oversized packets are rejected whole (MSG_TRUNC), never cut into a frame.
+        auto pair = seqpacket_pair();
+        const int size = 128 * 1024;
+        RECOVERY_CHECK_EQ(::setsockopt(pair.peer.get(), SOL_SOCKET, SO_SNDBUF, &size, sizeof size), 0);
+        RECOVERY_CHECK_EQ(::setsockopt(pair.local.get(), SOL_SOCKET, SO_RCVBUF, &size, sizeof size), 0);
+        auto session = Access::make_fault_session(std::move(pair.local), registration());
+        auto oversized = frame(kAllowedResource, 1);
+        oversized.authenticated_metadata.assign(70 * 1024, 0x5a);
+        send_frame(pair.peer, oversized);
+        RECOVERY_CHECK(terminal_of(io.read_authorized(session))
+                       == SessionTerminalCode::REJECTED_UNTRUSTED);
+    }
+    {
+        // Revocation is acquired per frame, so an allowed frame is still refused.
+        auto revocation = std::make_shared<recovery::FaultSourceRevocationState>();
+        auto pair = seqpacket_pair();
+        auto session = Access::make_fault_session(std::move(pair.local), registration(revocation));
+        RECOVERY_CHECK(revocation->revoke_release());
+        send_frame(pair.peer, frame(kAllowedResource, 1));
+        RECOVERY_CHECK(terminal_of(io.read_authorized(session))
+                       == SessionTerminalCode::REJECTED_UNTRUSTED);
+    }
 }
 
 RECOVERY_TEST(G1_peer_eof_is_distinct_from_io_error) {

@@ -1,16 +1,23 @@
 #include "recovery/ingress.hpp"
 
 #include "recovery/canonical.hpp"
+#include "recovery/crypto.hpp"
 
 #include <algorithm>
 #include <concepts>
+#include <cerrno>
+#include <sys/socket.h>
 #include <type_traits>
+#include <utility>
 
-// Task 4I (G1). The frame codec is the repository's canonical encoding; the
-// session reader below is still a placeholder that fails G1 on purpose.
+// Task 4I (G1): canonical fault-frame codec and the session reader that
+// receives and authorizes in one step. handle_frame is still a placeholder.
 
 namespace recovery {
 namespace {
+// Upper bound of one encoded frame; a larger packet is FRAME_TOO_LARGE.
+constexpr std::size_t kMaxFaultFrameBytes = 64 * 1024;
+
 void write_frame(CanonicalWriter& writer, const FaultFrame& frame) {
     canonical_write(writer, frame.wire_version);
     canonical_write(writer, frame.delivery_id.value);
@@ -123,16 +130,23 @@ FaultSourcePolicySnapshot::FaultSourcePolicySnapshot(
 std::variant<std::shared_ptr<const FaultSourcePolicySnapshot>, FaultSessionError>
 FaultSourcePolicySnapshot::create(std::vector<FaultSourcePolicyRule> rules) noexcept {
     try {
+        std::sort(rules.begin(), rules.end());
+        rules.erase(std::unique(rules.begin(), rules.end()), rules.end());
+        std::vector<std::pair<FaultKind, ResourceInstance>> canonical;
+        canonical.reserve(rules.size());
+        for (const auto& rule : rules) canonical.emplace_back(rule.kind, rule.resource);
+        const auto digest = canonical_digest(canonical);
         return std::shared_ptr<const FaultSourcePolicySnapshot>(
-            new FaultSourcePolicySnapshot(std::move(rules), Digest{}));
+            new FaultSourcePolicySnapshot(std::move(rules), digest));
     } catch (...) {
         return FaultSessionError::CAPABILITY_UNAVAILABLE;
     }
 }
 
 FaultSourcePolicyDecision FaultSourcePolicySnapshot::authorize(
-    FaultKind, ResourceInstance) const noexcept {
-    return FaultSourcePolicyDecision::DENY;
+    FaultKind kind, ResourceInstance resource) const noexcept {
+    return std::binary_search(rules_.begin(), rules_.end(), FaultSourcePolicyRule{kind, resource})
+        ? FaultSourcePolicyDecision::ALLOW : FaultSourcePolicyDecision::DENY;
 }
 
 bool FaultSourceRevocationState::is_revoked_acquire() const noexcept {
@@ -153,16 +167,48 @@ const AuthenticatedSourceInstance& FaultIngressSession::peer() const noexcept {
     return registration_->source;
 }
 
+// recvmsg + MSG_TRUNC: one packet is one frame, an oversized packet is never
+// truncated into a shorter "valid" one. A zero-length SEQPACKET packet reads
+// the same as an orderly close; both end only the peer's own session.
 std::variant<FaultFrame, FaultPeerEof, FaultSessionError> FaultIngressSession::receive_frame() {
-    return FaultSessionError::IO_FAILED;
+    std::vector<std::uint8_t> buffer(kMaxFaultFrameBytes);
+    iovec io{buffer.data(), buffer.size()};
+    msghdr message{};
+    message.msg_iov = &io;
+    message.msg_iovlen = 1;
+    ssize_t received = -1;
+    do {
+        received = ::recvmsg(connection_.get(), &message, MSG_CMSG_CLOEXEC);
+    } while (received < 0 && errno == EINTR);
+    if (received < 0) return FaultSessionError::IO_FAILED;
+    if (received == 0) return FaultPeerEof{};
+    if ((message.msg_flags & MSG_TRUNC) != 0) return FaultSessionError::FRAME_TOO_LARGE;
+    auto frame = decode_fault_frame(
+        std::span<const std::uint8_t>{buffer.data(), static_cast<std::size_t>(received)});
+    if (!frame) return FaultSessionError::FRAME_INVALID;
+    return std::move(*frame);
 }
 
-FaultSourcePolicyDecision FaultIngressSession::authorize_current(const FaultFrame&) const noexcept {
-    return FaultSourcePolicyDecision::DENY;
+FaultSourcePolicyDecision FaultIngressSession::authorize_current(
+    const FaultFrame& frame) const noexcept {
+    if (!registration_ || !registration_->policy || !registration_->revocation
+        || registration_->revocation->is_revoked_acquire())
+        return FaultSourcePolicyDecision::REVOKED;
+    return registration_->policy->authorize(frame.report.kind, frame.report.subject.resource);
 }
 
-SessionReadOutcome FaultIngressSessionIo::read_authorized(FaultIngressSession&) const {
-    return SessionTerminalResult{SessionTerminalCode::IO_ERROR};
+SessionReadOutcome FaultIngressSessionIo::read_authorized(FaultIngressSession& session) const {
+    auto received = session.receive_frame();
+    if (std::holds_alternative<FaultPeerEof>(received))
+        return SessionTerminalResult{SessionTerminalCode::PEER_EOF};
+    if (const auto* error = std::get_if<FaultSessionError>(&received)) {
+        return SessionTerminalResult{*error == FaultSessionError::IO_FAILED
+            ? SessionTerminalCode::IO_ERROR : SessionTerminalCode::REJECTED_UNTRUSTED};
+    }
+    auto& frame = std::get<FaultFrame>(received);
+    if (session.authorize_current(frame) != FaultSourcePolicyDecision::ALLOW)
+        return SessionTerminalResult{SessionTerminalCode::REJECTED_UNTRUSTED};
+    return AuthorizedFaultFrame{std::move(frame)};
 }
 
 FrameOutcome TrustedFaultIngress::handle_frame(const AuthorizedFaultFrame&, FaultIngressSession&,
