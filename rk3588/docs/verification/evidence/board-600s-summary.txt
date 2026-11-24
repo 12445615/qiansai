@@ -1,0 +1,24 @@
+=== BOARD 600s JOURNAL SUMMARY ===
+journal_lines=4241
+capture_fps_lines=120
+capture_fps_values=capture_fps=59.8 capture_fps=59.9 capture_fps=60.0
+stream_fps_values=stream_fps=59.8 stream_fps=59.9 stream_fps=60.0
+stream_failures_zero_lines=118
+stream_failures_nonzero_lines=0
+encode_fps_values=[Child][Encode] fps=59.8 [Child][Encode] fps=59.9 [Child][Encode] fps=60.0
+ai_samples=120
+ai_dropped_nonzero=3
+ai_failed_nonzero=4
+iommu_or_csi_errors=0
+segfault_or_fatal=0
+mqtt_connected_events=0
+upload_failures=17
+segment_rotations=30
+segments_deleted=30
+=== LAST AI LINE ===
+Nov 24 10:26:15 elf2-desktop rk3588-main[10075]: [Parent][AI] stats submitted=13393 processed=13391 dropped=0 failed=0 candidates=0 boxes=0 last_us=87362
+=== LAST VIDEO LINE ===
+Nov 24 10:26:15 elf2-desktop rk3588-main[10075]: [Parent][Video] capture_fps=59.9 stream_fps=59.9 stream_failures=0
+=== FIRST/LAST TIMESTAMPS ===
+Nov 24 10:16:20
+Nov 24 10:26:16
