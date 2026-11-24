@@ -16,6 +16,9 @@
 namespace recovery {
 
 class OwnedFd;
+class DeadlineTicket;
+class FaultJournalStore;
+class FileFaultJournalStore;
 class FaultIngressSession;
 class FaultIngressSessionIo;
 struct FaultSourceRegistration;
@@ -47,6 +50,11 @@ struct RecoveryTestAccess {
     static void revoke_test_channel(ChannelId);
     static void flip_ledger_prefix_digest(RecoveryCoordinator&);
     static void set_recovery_seq(RecoveryCoordinator&, RecoverySeq);
+    // A ticket with no scheduler behind it, already disarmed (store tests only).
+    static DeadlineTicket unarmed_ticket();
+    static void fail_next_journal_lock(FaultJournalStore&);
+    // Appends one raw, correctly chained entry so malformed records can be built.
+    static bool append_raw_journal_entry(FileFaultJournalStore&, const std::vector<std::uint8_t>&);
 };
 
 }  // namespace recovery

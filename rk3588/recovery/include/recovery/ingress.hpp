@@ -186,6 +186,45 @@ public:
     [[nodiscard]] SessionReadOutcome read_authorized(FaultIngressSession&) const;
 };
 
+// ===== deadline ticket capability (§14). The scheduler itself is slice S5;
+// the ticket exists now because every durable journal write is bound to one.
+struct DeadlineTicketId final {
+    std::uint64_t value{};
+    auto operator<=>(const DeadlineTicketId&) const = default;
+};
+struct DeadlineSlotId final {
+    std::uint32_t value;
+    auto operator<=>(const DeadlineSlotId&) const = default;
+};
+enum class IngressDeadlineKind : std::uint8_t { PREPARED_JOURNAL_IO, OWNER_EXECUTION, DELIVERED_JOURNAL_IO };
+class DeadlineScheduler;
+class DeadlineTicket final {
+    friend class DeadlineScheduler;
+    friend class TrustedFaultIngress;
+#ifdef RECOVERY_TESTING
+    friend struct RecoveryTestAccess;
+#endif
+    DeadlineTicket(std::shared_ptr<DeadlineScheduler>, std::shared_ptr<TrustedFaultIngress>,
+                   DeadlineTicketId, IngressDeadlineKind, DeadlineSlotId) noexcept;
+    void disarm_after_cancelled() noexcept;
+    std::shared_ptr<DeadlineScheduler> scheduler_;
+    std::shared_ptr<TrustedFaultIngress> ingress_;
+    DeadlineTicketId id_;
+    IngressDeadlineKind kind_;
+    DeadlineSlotId slot_;
+    bool armed_{true};
+public:
+    DeadlineTicket() = delete;
+    DeadlineTicket(const DeadlineTicket&) = delete;
+    DeadlineTicket& operator=(const DeadlineTicket&) = delete;
+    DeadlineTicket(DeadlineTicket&&) noexcept;
+    DeadlineTicket& operator=(DeadlineTicket&&) = delete;
+    ~DeadlineTicket() noexcept;   // armed ⇒ hard trip; never an implicit cancel
+    [[nodiscard]] DeadlineTicketId id() const noexcept { return id_; }
+    [[nodiscard]] IngressDeadlineKind kind() const noexcept { return kind_; }
+    [[nodiscard]] DeadlineSlotId slot() const noexcept { return slot_; }
+};
+
 class TrustedFaultIngress final {
 public:
     // The single handler entry: takes the session by value (§4.6.1). Its body
@@ -197,7 +236,11 @@ private:
 #ifdef RECOVERY_TESTING
     friend struct RecoveryTestAccess;
 #endif
+    friend class DeadlineTicket;
     TrustedFaultIngress() noexcept = default;
+    // Contract violation: no unwinding, no lock, no allocation. Wired to the
+    // HardWatchdogChannel with the lifecycle slice (S4).
+    [[noreturn]] void hard_trip(IngressFailureCode) noexcept;
     FrameOutcome handle_frame(const AuthorizedFaultFrame&, FaultIngressSession&,
                               const FaultIngressSessionIo&) noexcept;
 };
