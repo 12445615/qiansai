@@ -97,9 +97,9 @@ RECOVERY_TEST(R19_R41_unknown_without_action_is_explicit_fail_closed) {
 
 RECOVERY_TEST(R40_finish_compile_records_fallback_until_unique_execute_transition) {
     recovery::RecoveryCoordinator coordinator{7};
-    RECOVERY_CHECK(coordinator.report_fault(
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, 
         report(recovery::FaultKind::CAPABILITY_FAULT, 10)));
-    RECOVERY_CHECK(coordinator.begin_freeze({}));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({})));
     RECOVERY_CHECK(coordinator.commit_freeze());
     RECOVERY_CHECK(coordinator.begin_compile());
     const recovery::FallbackAction action{recovery::FallbackKind::BOARD_RESTART_REQUIRED,
@@ -116,8 +116,8 @@ RECOVERY_TEST(R40_finish_compile_records_fallback_until_unique_execute_transitio
 
 RECOVERY_TEST(R19_fallback_result_cannot_be_sealed_as_a_program) {
     recovery::RecoveryCoordinator coordinator{7};
-    RECOVERY_CHECK(coordinator.report_fault(report(recovery::FaultKind::UNKNOWN, 10)));
-    RECOVERY_CHECK(coordinator.begin_freeze({}));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, report(recovery::FaultKind::UNKNOWN, 10)));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({})));
     RECOVERY_CHECK(coordinator.commit_freeze());
     RECOVERY_CHECK(coordinator.begin_compile());
     coordinator.finish_compile(recovery::CompileFailure{
@@ -130,8 +130,8 @@ RECOVERY_TEST(R19_fallback_result_cannot_be_sealed_as_a_program) {
 
 RECOVERY_TEST(R41_failed_derivation_cannot_be_disguised_as_compile_success) {
     recovery::RecoveryCoordinator coordinator{7};
-    RECOVERY_CHECK(coordinator.report_fault(report(recovery::FaultKind::UNKNOWN, 10)));
-    RECOVERY_CHECK(coordinator.begin_freeze({}));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, report(recovery::FaultKind::UNKNOWN, 10)));
+    RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({})));
     RECOVERY_CHECK(coordinator.commit_freeze());
     auto pol = policy({{recovery::FaultKind::UNKNOWN,
                         recovery::FaultDisposition::UNRECOVERABLE}});

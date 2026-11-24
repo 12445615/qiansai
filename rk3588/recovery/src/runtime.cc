@@ -1,6 +1,10 @@
 #include "recovery/runtime.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <new>
 #include <fcntl.h>
 #include <fstream>
 #include <set>
@@ -118,6 +122,79 @@ bool descriptors_registry_agree(const std::vector<ProcessExitBindingDescriptor>&
     return true;
 }
 
+RequiredOwnersResult derive_required_owners(const std::vector<FrozenGrantRecord>& ledger_prefix) {
+    struct OwnerView {
+        bool authenticated{};
+        bool internal{};
+        bool principal_missing{};
+        std::set<ProcessPrincipal> principals;
+    };
+    std::map<OwnerId, OwnerView> views;
+    for (const auto& record : ledger_prefix) {
+        if (!is_active_binding_state(record.state)) continue;
+        auto& view = views[record.owner];
+        if (record.provenance == GrantProvenance::AUTHENTICATED_EXECUTOR) {
+            view.authenticated = true;
+            if (record.source_executor_principal) view.principals.insert(*record.source_executor_principal);
+            else view.principal_missing = true;
+        } else {
+            view.internal = true;
+        }
+    }
+    std::vector<RequiredOwner> required;
+    required.reserve(views.size());
+    for (const auto& [owner, view] : views) {
+        // Mixed provenance, an authenticated record without a principal, or two
+        // principals: refuse to guess who must ACK.
+        if ((view.authenticated && view.internal) || view.principal_missing
+            || view.principals.size() > 1)
+            return OwnerBindingInvalid{owner};
+        required.push_back(RequiredOwner{owner, view.authenticated
+            ? std::optional<ProcessPrincipal>{*view.principals.begin()} : std::nullopt});
+    }
+    return required;
+}
+
+std::set<GrantIdentity> expected_owner_grants(const std::vector<FrozenGrantRecord>& ledger_prefix,
+                                              OwnerId owner) {
+    std::set<GrantIdentity> grants;
+    for (const auto& record : ledger_prefix)
+        if (record.owner == owner && is_active_binding_state(record.state))
+            grants.insert(record.identity);
+    return grants;
+}
+
+Digest recompute_owner_ack_digest(const OwnerSnapshotAck& ack) {
+    return owner_ack_view_digest(ack);
+}
+
+OwnerSnapshotAck make_internal_owner_ack(const FreezeRequest& request, OwnerId owner,
+                                         const std::vector<FrozenGrantRecord>& ledger_prefix) {
+    OwnerSnapshotAck ack{request.recovery_id, request.freeze_seq, request.boot_id,
+                         request.closing_generation, owner,
+                         expected_owner_grants(ledger_prefix, owner), {}, {}};
+    ack.local_view_digest = recompute_owner_ack_digest(ack);
+    return ack;
+}
+
+const RequiredOwner* find_required_owner(const std::vector<RequiredOwner>& required,
+                                         OwnerId owner) noexcept {
+    for (const auto& entry : required)
+        if (entry.owner == owner) return &entry;
+    return nullptr;
+}
+
+bool all_required_owner_acks_present(const std::vector<RequiredOwner>& required,
+                                     const std::map<OwnerId, OwnerSnapshotAck>& acks) noexcept {
+    if (required.size() != acks.size()) return false;
+    auto ack = acks.begin();
+    for (const auto& entry : required) {           // both sides are OwnerId ascending
+        if (ack->first != entry.owner) return false;
+        ++ack;
+    }
+    return true;
+}
+
 RecoveryCoordinator::RecoveryCoordinator(BootId boot, ProcessExitKernel* kernel)
     : kernel_(kernel ? kernel : &linux_kernel) { slot_.boot_id = boot; }
 
@@ -131,21 +208,61 @@ void RecoveryCoordinator::checkpoint(RuntimeFailureStage stage) {
 }
 #endif
 
+void fatal_watchdog_reboot(const char* reason) noexcept {
+    static constexpr char prefix[] = "recovery: fatal watchdog reboot: ";
+    (void)!::write(STDERR_FILENO, prefix, sizeof prefix - 1);
+    if (reason) (void)!::write(STDERR_FILENO, reason, std::strlen(reason));
+    (void)!::write(STDERR_FILENO, "\n", 1);
+    std::_Exit(kWatchdogRebootExitCode);
+}
+
+#ifdef RECOVERY_TESTING
+std::unique_lock<std::mutex> RecoveryCoordinator::lock_or_watchdog(
+    RuntimeFailureStage stage, const char* reason) noexcept {
+    try {
+        checkpoint(stage);
+        return std::unique_lock<std::mutex>{mutex_};
+    } catch (...) {
+        fatal_watchdog_reboot(reason);
+    }
+}
+#define RECOVERY_LOCK(stage, reason) lock_or_watchdog(RuntimeFailureStage::stage, reason)
+#else
+std::unique_lock<std::mutex> RecoveryCoordinator::lock_or_watchdog(const char* reason) noexcept {
+    try {
+        return std::unique_lock<std::mutex>{mutex_};
+    } catch (...) {
+        fatal_watchdog_reboot(reason);
+    }
+}
+#define RECOVERY_LOCK(stage, reason) lock_or_watchdog(reason)
+#endif
+
 void RecoveryCoordinator::fail_closed_locked(const char* reason) noexcept {
     slot_.fail_reason = reason;
     slot_.state = RecoverySlotState::FAIL_CLOSED;
 }
 
-bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
-    try {
-        std::unique_lock<std::mutex> guard{mutex_, std::defer_lock};
-        guard.lock();
+FaultReportResult RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
+    const auto guard = RECOVERY_LOCK(REPORT_LOCK, "report_fault lock failed");
+    {
         try {
         const auto make_fact = [this, &report](std::uint64_t sequence) {
             return FaultFact{FaultIdentity{slot_.boot_id, sequence}, report.kind,
                              report.subject, report.observed_epochs, report.evidence};
         };
+        constexpr auto kSequenceMax = std::numeric_limits<std::uint64_t>::max();
+        // An identity is never reissued: exhaustion fails closed before any write.
+        const bool accepting = slot_.state == RecoverySlotState::IDLE
+            || slot_.state == RecoverySlotState::PREPARING
+            || slot_.state == RecoverySlotState::FREEZING;
+        if (accepting && slot_.fault_seq_counter == kSequenceMax) {
+            fail_closed_locked("fault seq exhausted"); return FaultReportResult::FAIL_CLOSED;
+        }
         if (slot_.state == RecoverySlotState::IDLE) {
+            if (slot_.recovery_seq == kSequenceMax) {
+                fail_closed_locked("recovery seq exhausted"); return FaultReportResult::FAIL_CLOSED;
+            }
 #ifdef RECOVERY_TESTING
             checkpoint(RuntimeFailureStage::REPORT_PREPARE);
 #endif
@@ -158,12 +275,12 @@ bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
             slot_.fault_seq_counter = next_fault_sequence;
             slot_.recovery_seq = next_sequence;
             slot_.state = RecoverySlotState::PREPARING;
-            return true;
+            return FaultReportResult::ACCEPTED;
         }
         if (slot_.state == RecoverySlotState::PREPARING
             || slot_.state == RecoverySlotState::FREEZING) {
             if (!slot_.active) {
-                fail_closed_locked("active runtime missing"); return false;
+                fail_closed_locked("active runtime missing"); return FaultReportResult::FAIL_CLOSED;
             }
 #ifdef RECOVERY_TESTING
             checkpoint(RuntimeFailureStage::REPORT_APPEND);
@@ -172,15 +289,18 @@ bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
             auto prepared = make_fact(next_fault_sequence);
             slot_.active->fault_batch.push_back(std::move(prepared));
             slot_.fault_seq_counter = next_fault_sequence;
-            return true;
+            return FaultReportResult::ACCEPTED;
         }
-        if (slot_.state == RecoverySlotState::FAIL_CLOSED) return false;
+        if (slot_.state == RecoverySlotState::FAIL_CLOSED) return FaultReportResult::FAIL_CLOSED;
         fail_closed_locked("fault after batch close");
         } catch (...) { fail_closed_locked("fault allocation failed"); }
-    } catch (...) {
-        return false;
     }
-    return false;
+    return FaultReportResult::FAIL_CLOSED;
+}
+
+void RecoveryCoordinator::fail_closed_from_ingress(IngressFailureCode) noexcept {
+    const auto guard = RECOVERY_LOCK(REPORT_LOCK, "fail_closed_from_ingress lock failed");
+    if (slot_.state != RecoverySlotState::FAIL_CLOSED) fail_closed_locked("ingress failed");
 }
 
 std::optional<RecoveryCoordinator::PreparedFaultBatchClose>
@@ -204,44 +324,95 @@ RecoveryCoordinator::prepare_fault_batch_close() const {
     return prepared;
 }
 
-bool RecoveryCoordinator::begin_freeze(
+BeginFreezeResult RecoveryCoordinator::begin_freeze(
     const std::vector<FrozenGrantRecord>& ledger,
     const std::vector<OwnerExecutorBinding>& owner_bindings) noexcept {
-    std::scoped_lock guard{mutex_};
-    if (slot_.state != RecoverySlotState::PREPARING || !slot_.active) return false;
+    const auto guard = RECOVERY_LOCK(BEGIN_FREEZE_LOCK, "begin_freeze lock failed");
+    if (slot_.state != RecoverySlotState::PREPARING)
+        return BeginFreezeError{BeginFreezeErrorCode::WRONG_PHASE};
+    if (!slot_.active) {
+        fail_closed_locked("begin_freeze active missing");
+        return BeginFreezeError{BeginFreezeErrorCode::INTERNAL_FAILURE};
+    }
+    if (slot_.freeze_seq == std::numeric_limits<FreezeSeq>::max()) {
+        fail_closed_locked("freeze seq exhausted");
+        return BeginFreezeError{BeginFreezeErrorCode::SEQUENCE_EXHAUSTED};
+    }
+
+    // Phase A: every fallible step builds locals only.
+    struct PreparedBeginFreeze {
+        FreezeSeq next_freeze_seq;
+        GrantSeq grant_cutoff;
+        std::vector<FrozenGrantRecord> ledger_prefix;
+        Digest ledger_prefix_digest;
+        std::vector<OwnerExecutorBinding> owner_bindings;
+        std::vector<RequiredOwner> required_owners;
+        std::map<OwnerId, OwnerSnapshotAck> internal_owner_acks;
+        FreezeRequest request;
+    };
+    std::optional<PreparedBeginFreeze> prepared;
     try {
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::BEGIN_FREEZE_PREPARE);
 #endif
-        auto prepared_ledger = ledger;
-        auto prepared_bindings = owner_bindings;
+        auto prefix = ledger;
+        auto bindings = owner_bindings;
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::BEGIN_FREEZE_AFTER_COPY);
 #endif
-        GrantSeq prepared_cutoff{};
-        for (const auto& grant : prepared_ledger)
-            prepared_cutoff = std::max(prepared_cutoff, grant.identity.seq);
-        const auto prepared_digest = canonical_digest(prepared_ledger);
-        const FreezeSeq prepared_freeze_seq = slot_.freeze_seq + 1;
-        FreezeRequest prepared_request{slot_.active->recovery_id, prepared_freeze_seq,
-            slot_.boot_id, slot_.closing_generation, prepared_cutoff, prepared_digest};
+        GrantSeq cutoff{};
+        for (const auto& grant : prefix) cutoff = std::max(cutoff, grant.identity.seq);
+        const Digest prefix_digest = canonical_digest(prefix);
+        const FreezeSeq next = slot_.freeze_seq + 1;   // exhaustion excluded above
+        const FreezeRequest request{slot_.active->recovery_id, next, slot_.boot_id,
+                                    slot_.closing_generation, cutoff, prefix_digest};
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::BEGIN_FREEZE_AFTER_DIGEST);
 #endif
-        slot_.active->ledger_prefix = std::move(prepared_ledger);
-        slot_.active->owner_executor_bindings = std::move(prepared_bindings);
-        slot_.active->grant_cutoff = prepared_cutoff;
-        slot_.active->ledger_prefix_digest = prepared_digest;
-        slot_.active->freeze_request = std::move(prepared_request);
-        slot_.freeze_seq = prepared_freeze_seq;
-        slot_.state = RecoverySlotState::FREEZING;
-        return true;
+        // §6.2: the owner set and its bindings come from this same frozen prefix;
+        // an invalid binding is a semantic failure, not an allocation failure.
+        auto owners = derive_required_owners(prefix);
+        if (const auto* invalid = std::get_if<OwnerBindingInvalid>(&owners)) {
+            (void)invalid;
+            fail_closed_locked("begin_freeze owner binding invalid");
+            return BeginFreezeError{BeginFreezeErrorCode::OWNER_BINDING_INVALID};
+        }
+        auto required = std::get<std::vector<RequiredOwner>>(std::move(owners));
+        std::map<OwnerId, OwnerSnapshotAck> internal_acks;
+        for (const auto& owner : required)
+            if (!owner.principal)   // coordinator-internal owner: its local view is the ledger
+                internal_acks.emplace(owner.owner, make_internal_owner_ack(request, owner.owner, prefix));
+        prepared.emplace(PreparedBeginFreeze{next, cutoff, std::move(prefix), prefix_digest,
+                                             std::move(bindings), std::move(required),
+                                             std::move(internal_acks), request});
+    } catch (const std::bad_alloc&) {
+        return BeginFreezeError{BeginFreezeErrorCode::ALLOCATION_FAILED};
+    } catch (...) {
+        fail_closed_locked("begin_freeze build failed");
+        return BeginFreezeError{BeginFreezeErrorCode::INTERNAL_FAILURE};
     }
-    catch (...) { return false; }
+
+    // Phase B: nothrow moves and scalar writes; state is published last. The
+    // request is returned, not stored: callers re-send this exact value.
+    static_assert(std::is_nothrow_move_assignable_v<std::vector<FrozenGrantRecord>>);
+    static_assert(std::is_nothrow_move_assignable_v<std::vector<OwnerExecutorBinding>>);
+    static_assert(std::is_nothrow_constructible_v<BeginFreezeResult, FreezeRequest>);
+    static_assert(std::is_nothrow_move_assignable_v<std::vector<RequiredOwner>>);
+    static_assert(std::is_nothrow_move_assignable_v<std::map<OwnerId, OwnerSnapshotAck>>);
+    slot_.freeze_seq = prepared->next_freeze_seq;
+    slot_.active->grant_cutoff = prepared->grant_cutoff;
+    slot_.active->ledger_prefix = std::move(prepared->ledger_prefix);
+    slot_.active->ledger_prefix_digest = prepared->ledger_prefix_digest;
+    slot_.active->owner_executor_bindings = std::move(prepared->owner_bindings);
+    slot_.active->required_owners = std::move(prepared->required_owners);
+    // External owners' ACKs arrive only through submit_owner_snapshot_ack.
+    slot_.active->accepted_owner_acks = std::move(prepared->internal_owner_acks);
+    slot_.state = RecoverySlotState::FREEZING;
+    return prepared->request;
 }
 
 bool RecoveryCoordinator::commit_freeze() noexcept {
-    std::scoped_lock guard{mutex_};
+    const auto guard = RECOVERY_LOCK(FREEZE_LOCK, "commit_freeze lock failed");
     if (slot_.state == RecoverySlotState::FROZEN) {
         fail_closed_locked("freeze already published"); return false;
     }
@@ -261,16 +432,12 @@ bool RecoveryCoordinator::commit_freeze() noexcept {
         if (!prepared_fault_batch) {
             fail_closed_locked("fault batch not freezeable"); return false;
         }
-        std::set<OwnerId> all_owners;
-        for (const auto& grant : slot_.active->ledger_prefix) all_owners.insert(grant.owner);
-        if (all_owners.size() != slot_.active->owner_acks.size()) {
+        if (!all_required_owner_acks_present(slot_.active->required_owners,
+                                             slot_.active->accepted_owner_acks)) {
             fail_closed_locked("owner ack missing"); return false;
         }
-        for (const auto owner : all_owners) {
-            if (!slot_.active->owner_acks.contains(owner)) {
-                fail_closed_locked("owner ack missing"); return false;
-            }
-        }
+        // §6.2: the ACK digest is computed once, here in Phase A, and lives only in the snapshot.
+        const Digest owner_ack_digest = canonical_digest(slot_.active->accepted_owner_acks);
         if (canonical_digest(slot_.active->ledger_prefix)
             != slot_.active->ledger_prefix_digest) {
             fail_closed_locked("prefix digest"); return false;
@@ -311,7 +478,7 @@ bool RecoveryCoordinator::commit_freeze() noexcept {
         FrozenRuntimeSnapshot snapshot{slot_.active->recovery_id, slot_.freeze_seq,
             slot_.boot_id, slot_.closing_generation, slot_.active->grant_cutoff,
             slot_.active->ledger_prefix, slot_.active->ledger_prefix_digest,
-            slot_.active->owner_ack_canonical_digest, prepared_fault_batch->fault_batch,
+            owner_ack_digest, prepared_fault_batch->fault_batch,
             prepared_fault_batch->fault_batch_cutoff, prepared_fault_batch->fault_batch_digest,
             slot_.active->owner_executor_bindings, std::move(descriptors),
             slot_.epochs, {}};
@@ -336,70 +503,83 @@ bool RecoveryCoordinator::commit_freeze() noexcept {
     } catch (...) { fail_closed_locked("freeze commit build failed"); return false; }
 }
 
-bool RecoveryCoordinator::submit_owner_snapshot_ack(const OwnerSnapshotAck& ack) noexcept {
-    std::scoped_lock guard{mutex_};
-    if (slot_.state != RecoverySlotState::FREEZING || !slot_.active
-        || ack.recovery_id != slot_.active->recovery_id
-        || ack.freeze_seq != slot_.freeze_seq || ack.boot_id != slot_.boot_id
-        || ack.closing_generation != slot_.closing_generation
-        || owner_ack_view_digest(ack) != ack.local_view_digest
-        || slot_.active->owner_acks.contains(ack.owner)) return false;
-    std::set<GrantIdentity> expected_grants;
-    std::set<LeaseIdentity> expected_leases;
-    for (const auto& grant : slot_.active->ledger_prefix) {
-        if (grant.owner != ack.owner) continue;
-        expected_grants.insert(grant.identity);
-        if (grant.lease) expected_leases.insert(*grant.lease);
-    }
-    if (expected_grants.empty() || ack.locally_observed_grants != expected_grants
-        || ack.outstanding_leases != expected_leases) return false;
+// §6.2 single intake for external owners. A rejection writes nothing; only two
+// different ACKs from one owner in one freeze are an owner fault (FAIL_CLOSED).
+OwnerAckResult RecoveryCoordinator::submit_owner_snapshot_ack(
+    const AuthenticatedExecutorContext& ctx, const OwnerSnapshotAck& ack) noexcept {
+    const auto guard = RECOVERY_LOCK(OWNER_ACK_LOCK, "submit_owner_snapshot_ack lock failed");
+    using E = OwnerAckErrorCode;
+    if (slot_.state != RecoverySlotState::FREEZING || !slot_.active)
+        return OwnerAckError{E::WRONG_PHASE};
     try {
-        auto candidate_acks = slot_.active->owner_acks;
-        candidate_acks.emplace(ack.owner, ack);
-        std::vector<OwnerSnapshotAck> canonical;
-        canonical.reserve(candidate_acks.size());
-        for (const auto& entry : candidate_acks) canonical.push_back(entry.second);
-        const auto candidate_digest = canonical_digest(canonical);
-        static_assert(std::is_nothrow_move_assignable_v<decltype(candidate_acks)>);
-        slot_.active->owner_acks = std::move(candidate_acks);
-        slot_.active->owner_ack_canonical_digest = candidate_digest;
-        return true;
-    } catch (...) { fail_closed_locked("owner ack allocation failed"); return false; }
+        if (!ExecutorAuthenticator::verify_context(ctx)) return OwnerAckError{E::UNAUTHORIZED};
+        const std::optional<ProcessPrincipal> who = ctx.process();
+        auto& runtime = *slot_.active;
+        if (ack.recovery_id != runtime.recovery_id || ack.freeze_seq != slot_.freeze_seq
+            || ack.boot_id != slot_.boot_id || ack.closing_generation != slot_.closing_generation)
+            return OwnerAckError{E::BINDING_MISMATCH};
+        const RequiredOwner* required = find_required_owner(runtime.required_owners, ack.owner);
+        if (!required) return OwnerAckError{E::NOT_REQUIRED_OWNER};
+        if (!required->principal || !who || *who != *required->principal)
+            return OwnerAckError{E::UNAUTHORIZED};
+        if (ack.locally_observed_grants != expected_owner_grants(runtime.ledger_prefix, ack.owner))
+            return OwnerAckError{E::GRANT_VIEW_MISMATCH};
+        if (recompute_owner_ack_digest(ack) != ack.local_view_digest)
+            return OwnerAckError{E::DIGEST_MISMATCH};
+        if (const auto found = runtime.accepted_owner_acks.find(ack.owner);
+            found != runtime.accepted_owner_acks.end()) {
+            if (found->second == ack) return OwnerAckAccepted{true};
+            fail_closed_locked("owner ack conflict");
+            return OwnerAckError{E::CONFLICT};
+        }
+#ifdef RECOVERY_TESTING
+        checkpoint(RuntimeFailureStage::OWNER_ACK_INSERT);
+#endif
+        runtime.accepted_owner_acks.emplace(ack.owner, ack);   // strong guarantee: the only write
+        return OwnerAckAccepted{false};
+    } catch (...) {
+        return OwnerAckError{E::ALLOCATION_FAILED};
+    }
 }
 
 bool RecoveryCoordinator::begin_compile(PolicySnapshot policy,
                                          CapabilityRegistrySnapshot registry) noexcept {
-    std::scoped_lock guard{mutex_};
+    const auto guard = RECOVERY_LOCK(BEGIN_COMPILE_LOCK, "begin_compile lock failed");
     if (slot_.state != RecoverySlotState::FROZEN || !slot_.active) {
         fail_closed_locked("state"); return false;
     }
+    try {
 #ifdef RECOVERY_TESTING
-    try { checkpoint(RuntimeFailureStage::BEGIN_COMPILE_PUBLISH); }
-    catch (...) { fail_closed_locked("compile publish failed"); return false; }
+        checkpoint(RuntimeFailureStage::BEGIN_COMPILE_PUBLISH);
 #endif
-    slot_.active->current_policy = std::move(policy);
-    slot_.active->current_registry = std::move(registry);
-    slot_.state = RecoverySlotState::COMPILING;
-    return true;
+        PolicySnapshot prepared_policy = std::move(policy);
+        CapabilityRegistrySnapshot prepared_registry = std::move(registry);
+        static_assert(std::is_nothrow_move_assignable_v<PolicySnapshot>);
+        static_assert(std::is_nothrow_move_assignable_v<CapabilityRegistrySnapshot>);
+        slot_.active->current_policy = std::move(prepared_policy);
+        slot_.active->current_registry = std::move(prepared_registry);
+        slot_.state = RecoverySlotState::COMPILING;
+        return true;
+    } catch (...) { fail_closed_locked("begin_compile build failed"); return false; }
 }
 
 void RecoveryCoordinator::finish_compile(CompileResult result) noexcept {
-    std::scoped_lock guard{mutex_};
+    const auto guard = RECOVERY_LOCK(FINISH_COMPILE_LOCK, "finish_compile lock failed");
     if (slot_.state != RecoverySlotState::COMPILING || !slot_.active) {
         fail_closed_locked("state"); return;
     }
-    if (auto* failure = std::get_if<CompileFailure>(&result)) {
-        if (failure->kind == CompileFailure::Kind::FALLBACK_REQUIRED) {
-            if (!failure->fallback) {
-                fail_closed_locked("no fallback action");
-            } else {
-                slot_.active->fallback_pending = true;
-                slot_.active->pending_fallback = failure->fallback;
-            }
-        } else fail_closed_locked("compile rejected");
-        return;
-    }
     try {
+        if (auto* failure = std::get_if<CompileFailure>(&result)) {
+            if (failure->kind != CompileFailure::Kind::FALLBACK_REQUIRED) {
+                fail_closed_locked("compile rejected"); return;
+            }
+            if (!failure->fallback) { fail_closed_locked("no fallback action"); return; }
+            auto prepared_fallback = failure->fallback;
+            static_assert(std::is_nothrow_move_assignable_v<std::optional<FallbackAction>>);
+            slot_.active->pending_fallback = std::move(prepared_fallback);
+            slot_.active->fallback_pending = true;
+            return;
+        }
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::FINISH_COMPILE_INSTALL);
 #endif
@@ -413,11 +593,11 @@ void RecoveryCoordinator::finish_compile(CompileResult result) noexcept {
             fail_closed_locked("compiled input mismatch"); return;
         }
         slot_.active->compiled_program = std::move(program);
-    } catch (...) { fail_closed_locked("compile install failed"); }
+    } catch (...) { fail_closed_locked("finish_compile install failed"); }
 }
 
 void RecoveryCoordinator::execute_fallback(std::optional<FallbackAction> fallback) noexcept {
-    std::scoped_lock guard{mutex_};
+    const auto guard = RECOVERY_LOCK(FALLBACK_LOCK, "execute_fallback lock failed");
     if (slot_.state != RecoverySlotState::COMPILING || !slot_.active
         || !slot_.active->fallback_pending
         || fallback != slot_.active->pending_fallback) {
@@ -428,31 +608,38 @@ void RecoveryCoordinator::execute_fallback(std::optional<FallbackAction> fallbac
 
 bool RecoveryCoordinator::seal_validated_program(
     const std::shared_ptr<const ValidatedRecoveryProgram>& program) noexcept {
-    std::scoped_lock guard{mutex_};
+    const auto guard = RECOVERY_LOCK(SEAL_LOCK, "seal lock failed");
     if (slot_.state != RecoverySlotState::COMPILING || !slot_.active
         || !program || program.get() != slot_.active->compiled_program.get()
-        || !slot_.active->current_snapshot
-        || compute_transaction_hash(*program) != program->transaction_hash()
-        || snapshot_digest(*slot_.active->current_snapshot)
-             != slot_.active->current_snapshot->snapshot_digest
-        || program->snapshot_digest() != slot_.active->current_snapshot->snapshot_digest
-        || program->policy_digest() != slot_.active->current_policy.digest
-        || program->registry_digest() != slot_.active->current_registry.digest
-        || program->faults() != slot_.active->current_snapshot->fault_batch) {
+        || !slot_.active->current_snapshot) {
         fail_closed_locked("seal validation"); return false;
     }
-    if (!snapshot_contents_match(*slot_.active)
-        || !expected_executors_match(*program, *slot_.active->current_snapshot,
-                                     slot_.active->current_policy)) {
-        fail_closed_locked("seal contents validation"); return false;
-    }
+    try {
 #ifdef RECOVERY_TESTING
-    try { checkpoint(RuntimeFailureStage::SEAL_PUBLISH); }
-    catch (...) { fail_closed_locked("seal publish failed"); return false; }
+        checkpoint(RuntimeFailureStage::SEAL_VERIFY);
 #endif
-    slot_.active->current_program = slot_.active->compiled_program;
-    slot_.active->transaction_hash = program->transaction_hash();
-    slot_.state = RecoverySlotState::SEALED;
-    return true;
+        if (compute_transaction_hash(*program) != program->transaction_hash()
+            || snapshot_digest(*slot_.active->current_snapshot)
+                 != slot_.active->current_snapshot->snapshot_digest
+            || program->snapshot_digest() != slot_.active->current_snapshot->snapshot_digest
+            || program->policy_digest() != slot_.active->current_policy.digest
+            || program->registry_digest() != slot_.active->current_registry.digest
+            || program->faults() != slot_.active->current_snapshot->fault_batch) {
+            fail_closed_locked("seal validation"); return false;
+        }
+        if (!snapshot_contents_match(*slot_.active)
+            || !expected_executors_match(*program, *slot_.active->current_snapshot,
+                                         slot_.active->current_policy)) {
+            fail_closed_locked("seal contents validation"); return false;
+        }
+#ifdef RECOVERY_TESTING
+        checkpoint(RuntimeFailureStage::SEAL_PUBLISH);
+#endif
+        const TransactionHash hash = program->transaction_hash();
+        slot_.active->current_program = slot_.active->compiled_program;
+        slot_.active->transaction_hash = hash;
+        slot_.state = RecoverySlotState::SEALED;
+        return true;
+    } catch (...) { fail_closed_locked("seal verification failed"); return false; }
 }
 }  // namespace recovery

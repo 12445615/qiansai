@@ -61,7 +61,7 @@ struct FaultReport {
     FaultSubject subject;
     EpochSnapshot observed_epochs;
     FaultEvidence evidence;
-    auto operator<=>(const FaultReport&) const = default;
+    // Deliberately no == / <=>: equal content carries no identity (§14, I37).
 };
 struct FaultIdentity {
     BootId boot_id;
@@ -131,6 +131,13 @@ struct DeviceTarget {
     DeviceContextIdentity device_context;
     auto operator<=>(const DeviceTarget&) const = default;
 };
+enum class GrantState : std::uint32_t { AUTHORIZED, MATERIALIZED, RELEASED, INVALIDATED };
+// Where a grant came from decides whether it can bind an online executor.
+enum class GrantProvenance : std::uint32_t { AUTHENTICATED_EXECUTOR, UNAUTHENTICATED_INTERNAL };
+// The single active-state rule shared by freeze derivation and audit (§6.2).
+[[nodiscard]] constexpr bool is_active_binding_state(GrantState state) noexcept {
+    return state == GrantState::AUTHORIZED || state == GrantState::MATERIALIZED;
+}
 struct FrozenGrantRecord {
     ResourceInstance source;
     std::optional<ResourceInstance> destination;
@@ -139,6 +146,11 @@ struct FrozenGrantRecord {
     GrantIdentity identity{};
     OwnerId owner{};
     std::optional<LeaseIdentity> lease{};
+    // Written only from the source endpoint's authenticated context; empty on
+    // UNAUTHENTICATED_INTERNAL records.
+    std::optional<ProcessPrincipal> source_executor_principal{};
+    GrantProvenance provenance{GrantProvenance::UNAUTHENTICATED_INTERNAL};
+    GrantState state{GrantState::AUTHORIZED};
     auto operator<=>(const FrozenGrantRecord&) const = default;
 };
 struct OwnerSnapshotAck {
@@ -400,7 +412,7 @@ RECOVERY_CANONICAL_STRUCT(CapabilityRegistryContents, canonical_write(writer, va
 RECOVERY_CANONICAL_STRUCT(ExecutionPredicate, canonical_write(writer, value.key); canonical_write(writer, value.required_kind); canonical_write(writer, value.required_issuer); canonical_write(writer, value.expected_subject); canonical_write(writer, value.epoch_mask); canonical_write(writer, value.expected_process_binding); canonical_write(writer, value.expected_spawn_generation);)
 RECOVERY_CANONICAL_STRUCT(CapabilityExpectation, canonical_write(writer, value.capability_id); canonical_write(writer, value.device_context); canonical_write(writer, value.environment); canonical_write(writer, value.evidence_id); canonical_write(writer, value.evidence_digest); canonical_write(writer, value.valid_from); canonical_write(writer, value.valid_until);)
 RECOVERY_CANONICAL_STRUCT(DeviceTarget, canonical_write(writer, value.device_context);)
-RECOVERY_CANONICAL_STRUCT(FrozenGrantRecord, canonical_write(writer, value.source); canonical_write(writer, value.destination); canonical_write(writer, value.execution_targets); canonical_write(writer, value.device_targets); canonical_write(writer, value.identity); canonical_write(writer, value.owner); canonical_write(writer, value.lease);)
+RECOVERY_CANONICAL_STRUCT(FrozenGrantRecord, canonical_write(writer, value.source); canonical_write(writer, value.destination); canonical_write(writer, value.execution_targets); canonical_write(writer, value.device_targets); canonical_write(writer, value.identity); canonical_write(writer, value.owner); canonical_write(writer, value.lease); canonical_write(writer, value.source_executor_principal); canonical_write(writer, value.provenance); canonical_write(writer, value.state);)
 RECOVERY_CANONICAL_STRUCT(OwnerSnapshotAck, canonical_write(writer, value.recovery_id); canonical_write(writer, value.freeze_seq); canonical_write(writer, value.boot_id); canonical_write(writer, value.closing_generation); canonical_write(writer, value.owner); canonical_write(writer, value.locally_observed_grants); canonical_write(writer, value.outstanding_leases); canonical_write(writer, value.local_view_digest);)
 RECOVERY_CANONICAL_STRUCT(DevicePredicate, canonical_write(writer, value.key); canonical_write(writer, value.required_kind); canonical_write(writer, value.required_issuer); canonical_write(writer, value.expected_device_context); canonical_write(writer, value.expected_target); canonical_write(writer, value.epoch_mask); canonical_write(writer, value.expected_capability);)
 #undef RECOVERY_CANONICAL_STRUCT

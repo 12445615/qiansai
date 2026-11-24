@@ -1,16 +1,27 @@
 #ifndef RECOVERY_TEST_SUPPORT_HPP
 #define RECOVERY_TEST_SUPPORT_HPP
 
+#include "recovery/auth.hpp"
 #include "recovery/program.hpp"
 
 #include <exception>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #ifdef RECOVERY_TESTING
 namespace recovery {
+
+class OwnedFd;
+class DeadlineTicket;
+class FaultJournalStore;
+class FileFaultJournalStore;
+class FaultIngressSession;
+class FaultIngressSessionIo;
+struct FaultSourceRegistration;
 
 struct RecoveryTestAccess {
     static FaultFact make_fault(BootId boot, std::uint64_t sequence,
@@ -22,6 +33,28 @@ struct RecoveryTestAccess {
     static void set_fault_batch(RecoveryCoordinator&, std::vector<FaultFact>);
     static void set_fault_seq_counter(RecoveryCoordinator&, std::uint64_t);
     static std::uint64_t fault_seq_counter(const RecoveryCoordinator&);
+    // report_fault is private (G11); tests reach it only here. True = ACCEPTED.
+    static bool report_fault(RecoveryCoordinator&, const FaultReport&);
+    static FreezeSeq freeze_seq(const RecoveryCoordinator&);
+    static void set_freeze_seq(RecoveryCoordinator&, FreezeSeq);
+    static FaultIngressSession make_fault_session(
+        OwnedFd connection, std::shared_ptr<const FaultSourceRegistration>);
+    static const FaultIngressSessionIo& session_io();
+    // True when another thread can take the coordinator mutex right now.
+    static bool mutex_free(RecoveryCoordinator&);
+    // Registers a connection for `process` in the trusted table and issues a
+    // context on it, standing in for the not-yet-built TrustedIpcAcceptor.
+    // With `stale_nonce` the context carries a nonce the table does not hold.
+    static AuthenticatedExecutorContext issue_test_context(
+        ProcessIdentity process, ChannelId* channel = nullptr, bool stale_nonce = false);
+    static void revoke_test_channel(ChannelId);
+    static void flip_ledger_prefix_digest(RecoveryCoordinator&);
+    static void set_recovery_seq(RecoveryCoordinator&, RecoverySeq);
+    // A ticket with no scheduler behind it, already disarmed (store tests only).
+    static DeadlineTicket unarmed_ticket();
+    static void fail_next_journal_lock(FaultJournalStore&);
+    // Appends one raw, correctly chained entry so malformed records can be built.
+    static bool append_raw_journal_entry(FileFaultJournalStore&, const std::vector<std::uint8_t>&);
 };
 
 }  // namespace recovery
@@ -33,6 +66,13 @@ template <typename Value>
 concept StreamInsertable = requires(std::ostream& output, const Value& value) {
     output << value;
 };
+
+// A result variant whose first alternative is the success value, e.g.
+// BeginFreezeResult = variant<FreezeRequest, BeginFreezeError>.
+template <typename... Alternatives>
+[[nodiscard]] bool succeeded(const std::variant<Alternatives...>& result) {
+    return result.index() == 0;
+}
 
 using TestFunction = void (*)();
 
