@@ -43,6 +43,8 @@ struct RecoveryTestAccess {
     static AuthenticatedExecutorContext issue_test_context(
         ProcessIdentity process, ChannelId* channel = nullptr, bool stale_nonce = false);
     static void revoke_test_channel(ChannelId);
+    static void flip_ledger_prefix_digest(RecoveryCoordinator&);
+    static void set_recovery_seq(RecoveryCoordinator&, RecoverySeq);
 };
 
 }  // namespace recovery

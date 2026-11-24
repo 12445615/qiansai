@@ -251,7 +251,18 @@ bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
             return FaultFact{FaultIdentity{slot_.boot_id, sequence}, report.kind,
                              report.subject, report.observed_epochs, report.evidence};
         };
+        constexpr auto kSequenceMax = std::numeric_limits<std::uint64_t>::max();
+        // An identity is never reissued: exhaustion fails closed before any write.
+        const bool accepting = slot_.state == RecoverySlotState::IDLE
+            || slot_.state == RecoverySlotState::PREPARING
+            || slot_.state == RecoverySlotState::FREEZING;
+        if (accepting && slot_.fault_seq_counter == kSequenceMax) {
+            fail_closed_locked("fault seq exhausted"); return false;
+        }
         if (slot_.state == RecoverySlotState::IDLE) {
+            if (slot_.recovery_seq == kSequenceMax) {
+                fail_closed_locked("recovery seq exhausted"); return false;
+            }
 #ifdef RECOVERY_TESTING
             checkpoint(RuntimeFailureStage::REPORT_PREPARE);
 #endif
