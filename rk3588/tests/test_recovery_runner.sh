@@ -14,6 +14,7 @@ fail() {
 mkdir -p "$build_dir"
 "$cxx" -std=c++20 -Wall -Wextra -Wpedantic -Werror \
     -I"$repo_dir/tests/recovery" \
+    -I"$repo_dir/recovery/include" \
     "$repo_dir/tests/recovery/test_main.cc" \
     "$repo_dir/tests/recovery/fixtures/runner_contract_fixture.cc" \
     -o "$runner"
