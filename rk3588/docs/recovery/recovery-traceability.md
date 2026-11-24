@@ -1,5 +1,16 @@
 # Recovery Traceability
 
+> **2026-11-24 — design FROZEN at `FE40C186…`, erratum baseline `62FE0D72…` (see `recovery-design-baseline.md`), Task 4 EXECUTING.**
+> Every PASS / CANDIDATE PASS row below predates this freeze and is regression evidence only until
+> re-run against the frozen hash. First RED slices, run on host (Ubuntu 24.04 g++, `make recovery-test`
+> / `recovery-compile-fail-test`):
+>
+> | ID | test | status |
+> | --- | --- | --- |
+> | R166 | `tests/recovery/test_freeze_entry.cc` (six `R166_*`) | RED: ③ non-alloc exception, ④ sequence exhaustion, ⑥ second request copy in runtime, ⑦ lock→watchdog fail; ①② and ⑤ already hold |
+> | R137 (lock clause) | `R137_commit_freeze_lock_failure_exits_through_watchdog_not_terminate` | RED: lock failure never reaches the watchdog stub |
+> | G1 | `tests/recovery/test_ingress_session.cc` (four `G1_*`) + `compile_fail/ingress_authorized_frame_construct.cc`, `compile_fail/ingress_handle_frame_raw.cc` | RED: codec, receive+authorize, PEER_EOF vs IO_ERROR fail against the skeleton; the two compile-fail bypasses and the `FrameOutcome` terminal alternative already hold |
+
 Scope: R1–**R165** and §19.1–§19.21. The design input is **no longer frozen**: Task 4 entered `DESIGN_BLOCKER` and the previous frozen SHA-256 `65F25A5A7CBC7E18F39ADDFA54CA0E8ACE5C6E67DEBFBA75480548EB4F215F5A` is **INVALIDATED**; see `docs/recovery/recovery-design-baseline.md` (`status = INVALIDATED / PENDING_REVIEW`). The revised design exists only as a candidate hash reported in this round's review output; it is deliberately not written into the design document, not recorded in the manifest, and must not be treated as a baseline.
 
 Status of the work itself: **Task 4 and Task 5 candidate implementations are complete, with the baseline still INVALIDATED / PENDING_REVIEW**. Task 5 now consumes the candidate frozen snapshot contract; its host proof/observation evidence is deliberately not claimed as a frozen-baseline PASS. The fault-batch close fact is now "state + `FrozenRuntimeSnapshot`", and the implementation uses `FaultReport` without caller identity, commits `fault_seq_counter` only after acceptance, rejects an empty batch at freeze, and performs no replay deduplication in the kernel. Byte-identical content is two independent facts with increasing identities; message idempotency remains outside the kernel in `TrustedFaultIngress`. `waitid(P_PIDFD)`/pidfd semantics on the RK3588 rootfs remain a separate §19 capability item and are not inferred from host evidence.
