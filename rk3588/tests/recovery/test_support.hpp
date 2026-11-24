@@ -34,6 +34,8 @@ struct RecoveryTestAccess {
     static FaultIngressSession make_fault_session(
         OwnedFd connection, std::shared_ptr<const FaultSourceRegistration>);
     static const FaultIngressSessionIo& session_io();
+    // True when another thread can take the coordinator mutex right now.
+    static bool mutex_free(RecoveryCoordinator&);
 };
 
 }  // namespace recovery

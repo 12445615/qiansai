@@ -143,15 +143,36 @@ void fatal_watchdog_reboot(const char* reason) noexcept {
     std::_Exit(kWatchdogRebootExitCode);
 }
 
+#ifdef RECOVERY_TESTING
+std::unique_lock<std::mutex> RecoveryCoordinator::lock_or_watchdog(
+    RuntimeFailureStage stage, const char* reason) noexcept {
+    try {
+        checkpoint(stage);
+        return std::unique_lock<std::mutex>{mutex_};
+    } catch (...) {
+        fatal_watchdog_reboot(reason);
+    }
+}
+#define RECOVERY_LOCK(stage, reason) lock_or_watchdog(RuntimeFailureStage::stage, reason)
+#else
+std::unique_lock<std::mutex> RecoveryCoordinator::lock_or_watchdog(const char* reason) noexcept {
+    try {
+        return std::unique_lock<std::mutex>{mutex_};
+    } catch (...) {
+        fatal_watchdog_reboot(reason);
+    }
+}
+#define RECOVERY_LOCK(stage, reason) lock_or_watchdog(reason)
+#endif
+
 void RecoveryCoordinator::fail_closed_locked(const char* reason) noexcept {
     slot_.fail_reason = reason;
     slot_.state = RecoverySlotState::FAIL_CLOSED;
 }
 
 bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
-    try {
-        std::unique_lock<std::mutex> guard{mutex_, std::defer_lock};
-        guard.lock();
+    const auto guard = RECOVERY_LOCK(REPORT_LOCK, "report_fault lock failed");
+    {
         try {
         const auto make_fact = [this, &report](std::uint64_t sequence) {
             return FaultFact{FaultIdentity{slot_.boot_id, sequence}, report.kind,
@@ -189,8 +210,6 @@ bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
         if (slot_.state == RecoverySlotState::FAIL_CLOSED) return false;
         fail_closed_locked("fault after batch close");
         } catch (...) { fail_closed_locked("fault allocation failed"); }
-    } catch (...) {
-        return false;
     }
     return false;
 }
@@ -219,15 +238,7 @@ RecoveryCoordinator::prepare_fault_batch_close() const {
 BeginFreezeResult RecoveryCoordinator::begin_freeze(
     const std::vector<FrozenGrantRecord>& ledger,
     const std::vector<OwnerExecutorBinding>& owner_bindings) noexcept {
-    std::unique_lock<std::mutex> guard;
-    try {
-#ifdef RECOVERY_TESTING
-        checkpoint(RuntimeFailureStage::BEGIN_FREEZE_LOCK);
-#endif
-        guard = std::unique_lock<std::mutex>{mutex_};
-    } catch (...) {
-        fatal_watchdog_reboot("begin_freeze lock failed");
-    }
+    const auto guard = RECOVERY_LOCK(BEGIN_FREEZE_LOCK, "begin_freeze lock failed");
     if (slot_.state != RecoverySlotState::PREPARING)
         return BeginFreezeError{BeginFreezeErrorCode::WRONG_PHASE};
     if (!slot_.active) {
@@ -291,15 +302,7 @@ BeginFreezeResult RecoveryCoordinator::begin_freeze(
 }
 
 bool RecoveryCoordinator::commit_freeze() noexcept {
-    std::unique_lock<std::mutex> guard;
-    try {
-#ifdef RECOVERY_TESTING
-        checkpoint(RuntimeFailureStage::FREEZE_LOCK);
-#endif
-        guard = std::unique_lock<std::mutex>{mutex_};
-    } catch (...) {
-        fatal_watchdog_reboot("commit_freeze lock failed");
-    }
+    const auto guard = RECOVERY_LOCK(FREEZE_LOCK, "commit_freeze lock failed");
     if (slot_.state == RecoverySlotState::FROZEN) {
         fail_closed_locked("freeze already published"); return false;
     }
@@ -395,23 +398,23 @@ bool RecoveryCoordinator::commit_freeze() noexcept {
 }
 
 bool RecoveryCoordinator::submit_owner_snapshot_ack(const OwnerSnapshotAck& ack) noexcept {
-    std::scoped_lock guard{mutex_};
-    if (slot_.state != RecoverySlotState::FREEZING || !slot_.active
-        || ack.recovery_id != slot_.active->recovery_id
-        || ack.freeze_seq != slot_.freeze_seq || ack.boot_id != slot_.boot_id
-        || ack.closing_generation != slot_.closing_generation
-        || owner_ack_view_digest(ack) != ack.local_view_digest
-        || slot_.active->owner_acks.contains(ack.owner)) return false;
-    std::set<GrantIdentity> expected_grants;
-    std::set<LeaseIdentity> expected_leases;
-    for (const auto& grant : slot_.active->ledger_prefix) {
-        if (grant.owner != ack.owner) continue;
-        expected_grants.insert(grant.identity);
-        if (grant.lease) expected_leases.insert(*grant.lease);
-    }
-    if (expected_grants.empty() || ack.locally_observed_grants != expected_grants
-        || ack.outstanding_leases != expected_leases) return false;
+    const auto guard = RECOVERY_LOCK(OWNER_ACK_LOCK, "submit_owner_snapshot_ack lock failed");
+    if (slot_.state != RecoverySlotState::FREEZING || !slot_.active) return false;
     try {
+        if (ack.recovery_id != slot_.active->recovery_id
+            || ack.freeze_seq != slot_.freeze_seq || ack.boot_id != slot_.boot_id
+            || ack.closing_generation != slot_.closing_generation
+            || owner_ack_view_digest(ack) != ack.local_view_digest
+            || slot_.active->owner_acks.contains(ack.owner)) return false;
+        std::set<GrantIdentity> expected_grants;
+        std::set<LeaseIdentity> expected_leases;
+        for (const auto& grant : slot_.active->ledger_prefix) {
+            if (grant.owner != ack.owner) continue;
+            expected_grants.insert(grant.identity);
+            if (grant.lease) expected_leases.insert(*grant.lease);
+        }
+        if (expected_grants.empty() || ack.locally_observed_grants != expected_grants
+            || ack.outstanding_leases != expected_leases) return false;
         auto candidate_acks = slot_.active->owner_acks;
         candidate_acks.emplace(ack.owner, ack);
         std::vector<OwnerSnapshotAck> canonical;
@@ -427,37 +430,42 @@ bool RecoveryCoordinator::submit_owner_snapshot_ack(const OwnerSnapshotAck& ack)
 
 bool RecoveryCoordinator::begin_compile(PolicySnapshot policy,
                                          CapabilityRegistrySnapshot registry) noexcept {
-    std::scoped_lock guard{mutex_};
+    const auto guard = RECOVERY_LOCK(BEGIN_COMPILE_LOCK, "begin_compile lock failed");
     if (slot_.state != RecoverySlotState::FROZEN || !slot_.active) {
         fail_closed_locked("state"); return false;
     }
+    try {
 #ifdef RECOVERY_TESTING
-    try { checkpoint(RuntimeFailureStage::BEGIN_COMPILE_PUBLISH); }
-    catch (...) { fail_closed_locked("compile publish failed"); return false; }
+        checkpoint(RuntimeFailureStage::BEGIN_COMPILE_PUBLISH);
 #endif
-    slot_.active->current_policy = std::move(policy);
-    slot_.active->current_registry = std::move(registry);
-    slot_.state = RecoverySlotState::COMPILING;
-    return true;
+        PolicySnapshot prepared_policy = std::move(policy);
+        CapabilityRegistrySnapshot prepared_registry = std::move(registry);
+        static_assert(std::is_nothrow_move_assignable_v<PolicySnapshot>);
+        static_assert(std::is_nothrow_move_assignable_v<CapabilityRegistrySnapshot>);
+        slot_.active->current_policy = std::move(prepared_policy);
+        slot_.active->current_registry = std::move(prepared_registry);
+        slot_.state = RecoverySlotState::COMPILING;
+        return true;
+    } catch (...) { fail_closed_locked("begin_compile build failed"); return false; }
 }
 
 void RecoveryCoordinator::finish_compile(CompileResult result) noexcept {
-    std::scoped_lock guard{mutex_};
+    const auto guard = RECOVERY_LOCK(FINISH_COMPILE_LOCK, "finish_compile lock failed");
     if (slot_.state != RecoverySlotState::COMPILING || !slot_.active) {
         fail_closed_locked("state"); return;
     }
-    if (auto* failure = std::get_if<CompileFailure>(&result)) {
-        if (failure->kind == CompileFailure::Kind::FALLBACK_REQUIRED) {
-            if (!failure->fallback) {
-                fail_closed_locked("no fallback action");
-            } else {
-                slot_.active->fallback_pending = true;
-                slot_.active->pending_fallback = failure->fallback;
-            }
-        } else fail_closed_locked("compile rejected");
-        return;
-    }
     try {
+        if (auto* failure = std::get_if<CompileFailure>(&result)) {
+            if (failure->kind != CompileFailure::Kind::FALLBACK_REQUIRED) {
+                fail_closed_locked("compile rejected"); return;
+            }
+            if (!failure->fallback) { fail_closed_locked("no fallback action"); return; }
+            auto prepared_fallback = failure->fallback;
+            static_assert(std::is_nothrow_move_assignable_v<std::optional<FallbackAction>>);
+            slot_.active->pending_fallback = std::move(prepared_fallback);
+            slot_.active->fallback_pending = true;
+            return;
+        }
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::FINISH_COMPILE_INSTALL);
 #endif
@@ -471,11 +479,11 @@ void RecoveryCoordinator::finish_compile(CompileResult result) noexcept {
             fail_closed_locked("compiled input mismatch"); return;
         }
         slot_.active->compiled_program = std::move(program);
-    } catch (...) { fail_closed_locked("compile install failed"); }
+    } catch (...) { fail_closed_locked("finish_compile install failed"); }
 }
 
 void RecoveryCoordinator::execute_fallback(std::optional<FallbackAction> fallback) noexcept {
-    std::scoped_lock guard{mutex_};
+    const auto guard = RECOVERY_LOCK(FALLBACK_LOCK, "execute_fallback lock failed");
     if (slot_.state != RecoverySlotState::COMPILING || !slot_.active
         || !slot_.active->fallback_pending
         || fallback != slot_.active->pending_fallback) {
@@ -486,31 +494,38 @@ void RecoveryCoordinator::execute_fallback(std::optional<FallbackAction> fallbac
 
 bool RecoveryCoordinator::seal_validated_program(
     const std::shared_ptr<const ValidatedRecoveryProgram>& program) noexcept {
-    std::scoped_lock guard{mutex_};
+    const auto guard = RECOVERY_LOCK(SEAL_LOCK, "seal lock failed");
     if (slot_.state != RecoverySlotState::COMPILING || !slot_.active
         || !program || program.get() != slot_.active->compiled_program.get()
-        || !slot_.active->current_snapshot
-        || compute_transaction_hash(*program) != program->transaction_hash()
-        || snapshot_digest(*slot_.active->current_snapshot)
-             != slot_.active->current_snapshot->snapshot_digest
-        || program->snapshot_digest() != slot_.active->current_snapshot->snapshot_digest
-        || program->policy_digest() != slot_.active->current_policy.digest
-        || program->registry_digest() != slot_.active->current_registry.digest
-        || program->faults() != slot_.active->current_snapshot->fault_batch) {
+        || !slot_.active->current_snapshot) {
         fail_closed_locked("seal validation"); return false;
     }
-    if (!snapshot_contents_match(*slot_.active)
-        || !expected_executors_match(*program, *slot_.active->current_snapshot,
-                                     slot_.active->current_policy)) {
-        fail_closed_locked("seal contents validation"); return false;
-    }
+    try {
 #ifdef RECOVERY_TESTING
-    try { checkpoint(RuntimeFailureStage::SEAL_PUBLISH); }
-    catch (...) { fail_closed_locked("seal publish failed"); return false; }
+        checkpoint(RuntimeFailureStage::SEAL_VERIFY);
 #endif
-    slot_.active->current_program = slot_.active->compiled_program;
-    slot_.active->transaction_hash = program->transaction_hash();
-    slot_.state = RecoverySlotState::SEALED;
-    return true;
+        if (compute_transaction_hash(*program) != program->transaction_hash()
+            || snapshot_digest(*slot_.active->current_snapshot)
+                 != slot_.active->current_snapshot->snapshot_digest
+            || program->snapshot_digest() != slot_.active->current_snapshot->snapshot_digest
+            || program->policy_digest() != slot_.active->current_policy.digest
+            || program->registry_digest() != slot_.active->current_registry.digest
+            || program->faults() != slot_.active->current_snapshot->fault_batch) {
+            fail_closed_locked("seal validation"); return false;
+        }
+        if (!snapshot_contents_match(*slot_.active)
+            || !expected_executors_match(*program, *slot_.active->current_snapshot,
+                                         slot_.active->current_policy)) {
+            fail_closed_locked("seal contents validation"); return false;
+        }
+#ifdef RECOVERY_TESTING
+        checkpoint(RuntimeFailureStage::SEAL_PUBLISH);
+#endif
+        const TransactionHash hash = program->transaction_hash();
+        slot_.active->current_program = slot_.active->compiled_program;
+        slot_.active->transaction_hash = hash;
+        slot_.state = RecoverySlotState::SEALED;
+        return true;
+    } catch (...) { fail_closed_locked("seal verification failed"); return false; }
 }
 }  // namespace recovery

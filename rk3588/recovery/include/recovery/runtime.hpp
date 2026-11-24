@@ -27,7 +27,8 @@ enum class RuntimeFailureStage : std::uint32_t {
     FREEZE_BATCH_PREPARE, FREEZE_BATCH_DIGEST, FREEZE_AFTER_BINDINGS,
     FREEZE_BINDING_LEGALITY, FREEZE_SNAPSHOT, FREEZE_SNAPSHOT_DIGEST,
     BEGIN_COMPILE_PUBLISH, FINISH_COMPILE_INSTALL, SEAL_PUBLISH,
-    BEGIN_FREEZE_LOCK, FREEZE_LOCK
+    BEGIN_FREEZE_LOCK, FREEZE_LOCK, REPORT_LOCK, OWNER_ACK_LOCK, BEGIN_COMPILE_LOCK,
+    FINISH_COMPILE_LOCK, FALLBACK_LOCK, SEAL_LOCK, SEAL_VERIFY
 };
 // A lock-acquire failure must end the process through fatal_watchdog_reboot,
 // never through std::terminate (R166 ⑦, R167).
@@ -176,6 +177,14 @@ private:
     [[nodiscard]] std::optional<PreparedFaultBatchClose>
     prepare_fault_batch_close() const;
     void fail_closed_locked(const char*) noexcept;
+    // §4.4 lock template: acquire inside a try whose only landing point is
+    // fatal_watchdog_reboot. No state is written before the lock is held.
+#ifdef RECOVERY_TESTING
+    [[nodiscard]] std::unique_lock<std::mutex> lock_or_watchdog(
+        RuntimeFailureStage, const char* reason) noexcept;
+#else
+    [[nodiscard]] std::unique_lock<std::mutex> lock_or_watchdog(const char* reason) noexcept;
+#endif
 };
 
 }  // namespace recovery
