@@ -20,3 +20,12 @@ main
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local self-test and bench binaries
+store_debug
+store_video_test
+encoder_test
+bench/rga_bench
+bench/rknn_bench
+bench/rknn_bench2
+bench/rknn_bench3
