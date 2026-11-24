@@ -96,8 +96,8 @@ make SYSROOT=/path/to/elf2-jammy-sysroot
 
 本次也同步优化了推流低延时和流畅度参数：
 
-- 默认推流帧率从 `15fps` 调整为 `30fps`，与摄像头采集帧率对齐
-- H264 GOP 调整为 `15` 帧，约 `0.5s` 一个关键帧
+- 默认推流帧率调整为 `60fps`，并优先采用驱动回报的实际帧率，与 1080p60 采集链对齐
+- H264 GOP 按 `fps / 2` 计算；60fps 下为 `30` 帧，约 `0.5s` 一个关键帧
 - 编码码率从 `2Mbps` 调整为 `3Mbps`
 - 码率缓冲从 `300KB` 调整为 `200KB`
 - `qmax` 从 `45` 调整为 `38`，减少复杂画面和运动画面的质量波动
@@ -105,12 +105,12 @@ make SYSROOT=/path/to/elf2-jammy-sysroot
 板端验证日志示例：
 
 ```text
-fps [30:1:fix]
-gop 15
+fps [60:1:fix]
+gop 30
 bps [2812500:3000000:3187500]
-[Child] stream duplicate_frames=1 target_fps=30
-[Child][Encode] fps=30.4 avg_ms=2.47 max_ms=25
-[Parent][Video] capture_fps=30.2 stream_fps=30.2
+[Child] stream duplicate_frames=1 target_fps=60
+[Child][Encode] fps=59.9 avg_ms=3.1 max_ms=13
+[Parent][Video] capture_fps=59.9 stream_fps=59.9 stream_failures=0
 ```
 
 核心结论：
