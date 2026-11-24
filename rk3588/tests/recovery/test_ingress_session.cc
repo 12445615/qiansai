@@ -83,6 +83,36 @@ RECOVERY_TEST(G1_frame_codec_round_trips_one_frame_per_packet) {
     RECOVERY_CHECK(*decoded == sent);
 }
 
+RECOVERY_TEST(G1_frame_codec_rejects_non_canonical_bytes) {
+    auto sent = frame(kAllowedResource, 1);
+    sent.authenticated_metadata = {9, 8, 7};
+    const auto bytes = recovery::encode_fault_frame(sent);
+    RECOVERY_CHECK(recovery::decode_fault_frame(bytes).has_value());
+
+    auto truncated = bytes;
+    truncated.pop_back();
+    RECOVERY_CHECK(!recovery::decode_fault_frame(truncated).has_value());
+
+    auto trailing = bytes;
+    trailing.push_back(0);
+    RECOVERY_CHECK(!recovery::decode_fault_frame(trailing).has_value());
+
+    // wire_version(4) + delivery count(4) + delivery(32) precede the kind.
+    constexpr std::size_t kKindOffset = 4 + 4 + 32;
+    auto bad_kind = bytes;
+    bad_kind[kKindOffset] = 0xff;
+    RECOVERY_CHECK(!recovery::decode_fault_frame(bad_kind).has_value());
+
+    // kind(4) + resource(8) precede the device_context optional tag.
+    auto bad_tag = bytes;
+    bad_tag[kKindOffset + 4 + 8] = 2;
+    RECOVERY_CHECK(!recovery::decode_fault_frame(bad_tag).has_value());
+
+    auto long_metadata = bytes;
+    long_metadata[long_metadata.size() - 3 - 4] = 0xff;  // metadata count claims 255 bytes
+    RECOVERY_CHECK(!recovery::decode_fault_frame(long_metadata).has_value());
+}
+
 RECOVERY_TEST(G1_reader_authorizes_inside_receive_and_rejection_is_terminal) {
     auto pair = seqpacket_pair();
     auto session = Access::make_fault_session(std::move(pair.local), registration());
