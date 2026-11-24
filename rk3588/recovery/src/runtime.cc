@@ -122,6 +122,79 @@ bool descriptors_registry_agree(const std::vector<ProcessExitBindingDescriptor>&
     return true;
 }
 
+RequiredOwnersResult derive_required_owners(const std::vector<FrozenGrantRecord>& ledger_prefix) {
+    struct OwnerView {
+        bool authenticated{};
+        bool internal{};
+        bool principal_missing{};
+        std::set<ProcessPrincipal> principals;
+    };
+    std::map<OwnerId, OwnerView> views;
+    for (const auto& record : ledger_prefix) {
+        if (!is_active_binding_state(record.state)) continue;
+        auto& view = views[record.owner];
+        if (record.provenance == GrantProvenance::AUTHENTICATED_EXECUTOR) {
+            view.authenticated = true;
+            if (record.source_executor_principal) view.principals.insert(*record.source_executor_principal);
+            else view.principal_missing = true;
+        } else {
+            view.internal = true;
+        }
+    }
+    std::vector<RequiredOwner> required;
+    required.reserve(views.size());
+    for (const auto& [owner, view] : views) {
+        // Mixed provenance, an authenticated record without a principal, or two
+        // principals: refuse to guess who must ACK.
+        if ((view.authenticated && view.internal) || view.principal_missing
+            || view.principals.size() > 1)
+            return OwnerBindingInvalid{owner};
+        required.push_back(RequiredOwner{owner, view.authenticated
+            ? std::optional<ProcessPrincipal>{*view.principals.begin()} : std::nullopt});
+    }
+    return required;
+}
+
+std::set<GrantIdentity> expected_owner_grants(const std::vector<FrozenGrantRecord>& ledger_prefix,
+                                              OwnerId owner) {
+    std::set<GrantIdentity> grants;
+    for (const auto& record : ledger_prefix)
+        if (record.owner == owner && is_active_binding_state(record.state))
+            grants.insert(record.identity);
+    return grants;
+}
+
+Digest recompute_owner_ack_digest(const OwnerSnapshotAck& ack) {
+    return owner_ack_view_digest(ack);
+}
+
+OwnerSnapshotAck make_internal_owner_ack(const FreezeRequest& request, OwnerId owner,
+                                         const std::vector<FrozenGrantRecord>& ledger_prefix) {
+    OwnerSnapshotAck ack{request.recovery_id, request.freeze_seq, request.boot_id,
+                         request.closing_generation, owner,
+                         expected_owner_grants(ledger_prefix, owner), {}, {}};
+    ack.local_view_digest = recompute_owner_ack_digest(ack);
+    return ack;
+}
+
+const RequiredOwner* find_required_owner(const std::vector<RequiredOwner>& required,
+                                         OwnerId owner) noexcept {
+    for (const auto& entry : required)
+        if (entry.owner == owner) return &entry;
+    return nullptr;
+}
+
+bool all_required_owner_acks_present(const std::vector<RequiredOwner>& required,
+                                     const std::map<OwnerId, OwnerSnapshotAck>& acks) noexcept {
+    if (required.size() != acks.size()) return false;
+    auto ack = acks.begin();
+    for (const auto& entry : required) {           // both sides are OwnerId ascending
+        if (ack->first != entry.owner) return false;
+        ++ack;
+    }
+    return true;
+}
+
 RecoveryCoordinator::RecoveryCoordinator(BootId boot, ProcessExitKernel* kernel)
     : kernel_(kernel ? kernel : &linux_kernel) { slot_.boot_id = boot; }
 
@@ -257,6 +330,8 @@ BeginFreezeResult RecoveryCoordinator::begin_freeze(
         std::vector<FrozenGrantRecord> ledger_prefix;
         Digest ledger_prefix_digest;
         std::vector<OwnerExecutorBinding> owner_bindings;
+        std::vector<RequiredOwner> required_owners;
+        std::map<OwnerId, OwnerSnapshotAck> internal_owner_acks;
         FreezeRequest request;
     };
     std::optional<PreparedBeginFreeze> prepared;
@@ -278,8 +353,22 @@ BeginFreezeResult RecoveryCoordinator::begin_freeze(
 #ifdef RECOVERY_TESTING
         checkpoint(RuntimeFailureStage::BEGIN_FREEZE_AFTER_DIGEST);
 #endif
+        // §6.2: the owner set and its bindings come from this same frozen prefix;
+        // an invalid binding is a semantic failure, not an allocation failure.
+        auto owners = derive_required_owners(prefix);
+        if (const auto* invalid = std::get_if<OwnerBindingInvalid>(&owners)) {
+            (void)invalid;
+            fail_closed_locked("begin_freeze owner binding invalid");
+            return BeginFreezeError{BeginFreezeErrorCode::OWNER_BINDING_INVALID};
+        }
+        auto required = std::get<std::vector<RequiredOwner>>(std::move(owners));
+        std::map<OwnerId, OwnerSnapshotAck> internal_acks;
+        for (const auto& owner : required)
+            if (!owner.principal)   // coordinator-internal owner: its local view is the ledger
+                internal_acks.emplace(owner.owner, make_internal_owner_ack(request, owner.owner, prefix));
         prepared.emplace(PreparedBeginFreeze{next, cutoff, std::move(prefix), prefix_digest,
-                                             std::move(bindings), request});
+                                             std::move(bindings), std::move(required),
+                                             std::move(internal_acks), request});
     } catch (const std::bad_alloc&) {
         return BeginFreezeError{BeginFreezeErrorCode::ALLOCATION_FAILED};
     } catch (...) {
@@ -292,11 +381,16 @@ BeginFreezeResult RecoveryCoordinator::begin_freeze(
     static_assert(std::is_nothrow_move_assignable_v<std::vector<FrozenGrantRecord>>);
     static_assert(std::is_nothrow_move_assignable_v<std::vector<OwnerExecutorBinding>>);
     static_assert(std::is_nothrow_constructible_v<BeginFreezeResult, FreezeRequest>);
+    static_assert(std::is_nothrow_move_assignable_v<std::vector<RequiredOwner>>);
+    static_assert(std::is_nothrow_move_assignable_v<std::map<OwnerId, OwnerSnapshotAck>>);
     slot_.freeze_seq = prepared->next_freeze_seq;
     slot_.active->grant_cutoff = prepared->grant_cutoff;
     slot_.active->ledger_prefix = std::move(prepared->ledger_prefix);
     slot_.active->ledger_prefix_digest = prepared->ledger_prefix_digest;
     slot_.active->owner_executor_bindings = std::move(prepared->owner_bindings);
+    slot_.active->required_owners = std::move(prepared->required_owners);
+    // External owners' ACKs arrive only through submit_owner_snapshot_ack.
+    slot_.active->accepted_owner_acks = std::move(prepared->internal_owner_acks);
     slot_.state = RecoverySlotState::FREEZING;
     return prepared->request;
 }
@@ -322,16 +416,12 @@ bool RecoveryCoordinator::commit_freeze() noexcept {
         if (!prepared_fault_batch) {
             fail_closed_locked("fault batch not freezeable"); return false;
         }
-        std::set<OwnerId> all_owners;
-        for (const auto& grant : slot_.active->ledger_prefix) all_owners.insert(grant.owner);
-        if (all_owners.size() != slot_.active->owner_acks.size()) {
+        if (!all_required_owner_acks_present(slot_.active->required_owners,
+                                             slot_.active->accepted_owner_acks)) {
             fail_closed_locked("owner ack missing"); return false;
         }
-        for (const auto owner : all_owners) {
-            if (!slot_.active->owner_acks.contains(owner)) {
-                fail_closed_locked("owner ack missing"); return false;
-            }
-        }
+        // §6.2: the ACK digest is computed once, here in Phase A, and lives only in the snapshot.
+        const Digest owner_ack_digest = canonical_digest(slot_.active->accepted_owner_acks);
         if (canonical_digest(slot_.active->ledger_prefix)
             != slot_.active->ledger_prefix_digest) {
             fail_closed_locked("prefix digest"); return false;
@@ -372,7 +462,7 @@ bool RecoveryCoordinator::commit_freeze() noexcept {
         FrozenRuntimeSnapshot snapshot{slot_.active->recovery_id, slot_.freeze_seq,
             slot_.boot_id, slot_.closing_generation, slot_.active->grant_cutoff,
             slot_.active->ledger_prefix, slot_.active->ledger_prefix_digest,
-            slot_.active->owner_ack_canonical_digest, prepared_fault_batch->fault_batch,
+            owner_ack_digest, prepared_fault_batch->fault_batch,
             prepared_fault_batch->fault_batch_cutoff, prepared_fault_batch->fault_batch_digest,
             slot_.active->owner_executor_bindings, std::move(descriptors),
             slot_.epochs, {}};
@@ -397,35 +487,43 @@ bool RecoveryCoordinator::commit_freeze() noexcept {
     } catch (...) { fail_closed_locked("freeze commit build failed"); return false; }
 }
 
-bool RecoveryCoordinator::submit_owner_snapshot_ack(const OwnerSnapshotAck& ack) noexcept {
+// §6.2 single intake for external owners. A rejection writes nothing; only two
+// different ACKs from one owner in one freeze are an owner fault (FAIL_CLOSED).
+OwnerAckResult RecoveryCoordinator::submit_owner_snapshot_ack(
+    const AuthenticatedExecutorContext& ctx, const OwnerSnapshotAck& ack) noexcept {
     const auto guard = RECOVERY_LOCK(OWNER_ACK_LOCK, "submit_owner_snapshot_ack lock failed");
-    if (slot_.state != RecoverySlotState::FREEZING || !slot_.active) return false;
+    using E = OwnerAckErrorCode;
+    if (slot_.state != RecoverySlotState::FREEZING || !slot_.active)
+        return OwnerAckError{E::WRONG_PHASE};
     try {
-        if (ack.recovery_id != slot_.active->recovery_id
-            || ack.freeze_seq != slot_.freeze_seq || ack.boot_id != slot_.boot_id
-            || ack.closing_generation != slot_.closing_generation
-            || owner_ack_view_digest(ack) != ack.local_view_digest
-            || slot_.active->owner_acks.contains(ack.owner)) return false;
-        std::set<GrantIdentity> expected_grants;
-        std::set<LeaseIdentity> expected_leases;
-        for (const auto& grant : slot_.active->ledger_prefix) {
-            if (grant.owner != ack.owner) continue;
-            expected_grants.insert(grant.identity);
-            if (grant.lease) expected_leases.insert(*grant.lease);
+        if (!ExecutorAuthenticator::verify_context(ctx)) return OwnerAckError{E::UNAUTHORIZED};
+        const std::optional<ProcessPrincipal> who = ctx.process();
+        auto& runtime = *slot_.active;
+        if (ack.recovery_id != runtime.recovery_id || ack.freeze_seq != slot_.freeze_seq
+            || ack.boot_id != slot_.boot_id || ack.closing_generation != slot_.closing_generation)
+            return OwnerAckError{E::BINDING_MISMATCH};
+        const RequiredOwner* required = find_required_owner(runtime.required_owners, ack.owner);
+        if (!required) return OwnerAckError{E::NOT_REQUIRED_OWNER};
+        if (!required->principal || !who || *who != *required->principal)
+            return OwnerAckError{E::UNAUTHORIZED};
+        if (ack.locally_observed_grants != expected_owner_grants(runtime.ledger_prefix, ack.owner))
+            return OwnerAckError{E::GRANT_VIEW_MISMATCH};
+        if (recompute_owner_ack_digest(ack) != ack.local_view_digest)
+            return OwnerAckError{E::DIGEST_MISMATCH};
+        if (const auto found = runtime.accepted_owner_acks.find(ack.owner);
+            found != runtime.accepted_owner_acks.end()) {
+            if (found->second == ack) return OwnerAckAccepted{true};
+            fail_closed_locked("owner ack conflict");
+            return OwnerAckError{E::CONFLICT};
         }
-        if (expected_grants.empty() || ack.locally_observed_grants != expected_grants
-            || ack.outstanding_leases != expected_leases) return false;
-        auto candidate_acks = slot_.active->owner_acks;
-        candidate_acks.emplace(ack.owner, ack);
-        std::vector<OwnerSnapshotAck> canonical;
-        canonical.reserve(candidate_acks.size());
-        for (const auto& entry : candidate_acks) canonical.push_back(entry.second);
-        const auto candidate_digest = canonical_digest(canonical);
-        static_assert(std::is_nothrow_move_assignable_v<decltype(candidate_acks)>);
-        slot_.active->owner_acks = std::move(candidate_acks);
-        slot_.active->owner_ack_canonical_digest = candidate_digest;
-        return true;
-    } catch (...) { fail_closed_locked("owner ack allocation failed"); return false; }
+#ifdef RECOVERY_TESTING
+        checkpoint(RuntimeFailureStage::OWNER_ACK_INSERT);
+#endif
+        runtime.accepted_owner_acks.emplace(ack.owner, ack);   // strong guarantee: the only write
+        return OwnerAckAccepted{false};
+    } catch (...) {
+        return OwnerAckError{E::ALLOCATION_FAILED};
+    }
 }
 
 bool RecoveryCoordinator::begin_compile(PolicySnapshot policy,

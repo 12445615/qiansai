@@ -54,6 +54,12 @@ recovery-task4-boundary:
 	else \
 		echo "PASS: RecoveryInstanceRuntime has only the collecting fault_batch"; \
 	fi
+	@if sed -n '/struct RecoveryInstanceRuntime/,/^};/p' $(RECOVERY_INCLUDE_DIR)/recovery/runtime.hpp \
+		| grep -En 'acked_owners|owner_ack_canonical_digest'; then \
+		echo "FAIL: owner-ACK digest or acked set duplicated in RecoveryInstanceRuntime (R168)" >&2; exit 1; \
+	else \
+		echo "PASS: RecoveryInstanceRuntime keeps owner ACKs only as required_owners + accepted_owner_acks"; \
+	fi
 	@if grep -REn 'FaultReportToken|ReporterId|last_report_seq|fault_content_digest' \
 		$(RECOVERY_INCLUDE_DIR)/recovery $(RECOVERY_SOURCE_DIR); then \
 		echo "FAIL: deleted replay/dedup kernel state remains in recovery sources" >&2; exit 1; \

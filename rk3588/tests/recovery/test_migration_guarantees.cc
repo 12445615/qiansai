@@ -143,7 +143,8 @@ RECOVERY_TEST(R167_lock_failure_in_every_migration_exits_through_watchdog) {
          [](Compiling& in) { (void)in.coordinator->report_fault(fault()); }},
         {RuntimeFailureStage::OWNER_ACK_LOCK, Upto::FREEZING,
          [](Compiling& in) {
-             (void)in.coordinator->submit_owner_snapshot_ack(any_ack(*in.coordinator));
+             const auto ctx = Access::issue_test_context({99, 100});
+             (void)in.coordinator->submit_owner_snapshot_ack(ctx, any_ack(*in.coordinator));
          }},
         {RuntimeFailureStage::BEGIN_COMPILE_LOCK, Upto::FROZEN,
          [](Compiling& in) { (void)in.coordinator->begin_compile(in.policy, in.registry); }},
@@ -225,7 +226,10 @@ RECOVERY_TEST(R167_every_return_path_releases_the_mutex) {
     {
         auto in = drive(Upto::FREEZING, nullptr);
         auto& c = *in.coordinator;
-        RECOVERY_CHECK(!c.submit_owner_snapshot_ack(any_ack(c))); released(c);
+        const auto ctx = Access::issue_test_context({99, 100});
+        RECOVERY_CHECK(std::holds_alternative<recovery::OwnerAckError>(
+            c.submit_owner_snapshot_ack(ctx, any_ack(c))));
+        released(c);
         c.finish_compile(recovery::CompileFailure{
             recovery::CompileFailure::Kind::FALLBACK_REQUIRED, std::nullopt});
         released(c);

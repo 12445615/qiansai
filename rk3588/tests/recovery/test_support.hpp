@@ -1,6 +1,7 @@
 #ifndef RECOVERY_TEST_SUPPORT_HPP
 #define RECOVERY_TEST_SUPPORT_HPP
 
+#include "recovery/auth.hpp"
 #include "recovery/program.hpp"
 
 #include <exception>
@@ -36,6 +37,12 @@ struct RecoveryTestAccess {
     static const FaultIngressSessionIo& session_io();
     // True when another thread can take the coordinator mutex right now.
     static bool mutex_free(RecoveryCoordinator&);
+    // Registers a connection for `process` in the trusted table and issues a
+    // context on it, standing in for the not-yet-built TrustedIpcAcceptor.
+    // With `stale_nonce` the context carries a nonce the table does not hold.
+    static AuthenticatedExecutorContext issue_test_context(
+        ProcessIdentity process, ChannelId* channel = nullptr, bool stale_nonce = false);
+    static void revoke_test_channel(ChannelId);
 };
 
 }  // namespace recovery

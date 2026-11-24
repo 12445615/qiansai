@@ -1,12 +1,16 @@
 #ifndef RECOVERY_RUNTIME_HPP
 #define RECOVERY_RUNTIME_HPP
 
+#include "recovery/auth.hpp"
 #include "recovery/compiler.hpp"
 
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
+#include <variant>
+#include <vector>
 #include <string>
 
 namespace recovery {
@@ -28,7 +32,7 @@ enum class RuntimeFailureStage : std::uint32_t {
     FREEZE_BINDING_LEGALITY, FREEZE_SNAPSHOT, FREEZE_SNAPSHOT_DIGEST,
     BEGIN_COMPILE_PUBLISH, FINISH_COMPILE_INSTALL, SEAL_PUBLISH,
     BEGIN_FREEZE_LOCK, FREEZE_LOCK, REPORT_LOCK, OWNER_ACK_LOCK, BEGIN_COMPILE_LOCK,
-    FINISH_COMPILE_LOCK, FALLBACK_LOCK, SEAL_LOCK, SEAL_VERIFY
+    FINISH_COMPILE_LOCK, FALLBACK_LOCK, SEAL_LOCK, SEAL_VERIFY, OWNER_ACK_INSERT
 };
 // A lock-acquire failure must end the process through fatal_watchdog_reboot,
 // never through std::terminate (R166 ⑦, R167).
@@ -78,6 +82,36 @@ enum class BeginFreezeErrorCode : std::uint8_t {
 };
 struct BeginFreezeError final { BeginFreezeErrorCode code; };
 using BeginFreezeResult = std::variant<FreezeRequest, BeginFreezeError>;
+// ===== §6.2 owner set and ACK intake =====
+// An owner that must ACK this freeze; no principal = coordinator-internal
+// owner whose ACK begin_freeze synthesizes.
+struct RequiredOwner {
+    OwnerId owner;
+    std::optional<ProcessPrincipal> principal;
+    auto operator<=>(const RequiredOwner&) const = default;
+};
+struct OwnerBindingInvalid { OwnerId owner; };
+using RequiredOwnersResult = std::variant<std::vector<RequiredOwner>, OwnerBindingInvalid>;
+// Pure; reads only active records of the frozen prefix, OwnerId ascending. May allocate.
+[[nodiscard]] RequiredOwnersResult derive_required_owners(
+    const std::vector<FrozenGrantRecord>& ledger_prefix);
+[[nodiscard]] std::set<GrantIdentity> expected_owner_grants(
+    const std::vector<FrozenGrantRecord>& ledger_prefix, OwnerId owner);
+[[nodiscard]] Digest recompute_owner_ack_digest(const OwnerSnapshotAck&);
+[[nodiscard]] OwnerSnapshotAck make_internal_owner_ack(
+    const FreezeRequest&, OwnerId, const std::vector<FrozenGrantRecord>& ledger_prefix);
+[[nodiscard]] const RequiredOwner* find_required_owner(
+    const std::vector<RequiredOwner>&, OwnerId) noexcept;
+[[nodiscard]] bool all_required_owner_acks_present(
+    const std::vector<RequiredOwner>&, const std::map<OwnerId, OwnerSnapshotAck>&) noexcept;
+enum class OwnerAckErrorCode : std::uint8_t {
+    WRONG_PHASE, UNAUTHORIZED, BINDING_MISMATCH, NOT_REQUIRED_OWNER,
+    GRANT_VIEW_MISMATCH, DIGEST_MISMATCH, CONFLICT, ALLOCATION_FAILED
+};
+struct OwnerAckError final { OwnerAckErrorCode code; };
+struct OwnerAckAccepted final { bool duplicate; };
+using OwnerAckResult = std::variant<OwnerAckAccepted, OwnerAckError>;
+
 using ProcessExitBindingRegistry =
     std::map<ProcessExitBindingId, OwnedProcessExitBinding>;
 
@@ -100,8 +134,8 @@ struct RecoveryInstanceRuntime {
     GrantSeq grant_cutoff{};
     Digest ledger_prefix_digest{};
     std::vector<OwnerExecutorBinding> owner_executor_bindings;
-    std::map<OwnerId, OwnerSnapshotAck> owner_acks;
-    Digest owner_ack_canonical_digest{};
+    std::vector<RequiredOwner> required_owners;               // set once by begin_freeze
+    std::map<OwnerId, OwnerSnapshotAck> accepted_owner_acks;  // internal ACKs + §6.2 intake
     std::optional<FrozenRuntimeSnapshot> current_snapshot;
     ProcessExitBindingRegistry process_exit_binding_registry;
     PolicySnapshot current_policy{};
@@ -147,7 +181,8 @@ public:
         const std::vector<FrozenGrantRecord>&,
         const std::vector<OwnerExecutorBinding>& = {}) noexcept;
     [[nodiscard]] bool commit_freeze() noexcept;
-    [[nodiscard]] bool submit_owner_snapshot_ack(const OwnerSnapshotAck&) noexcept;
+    [[nodiscard]] OwnerAckResult submit_owner_snapshot_ack(
+        const AuthenticatedExecutorContext&, const OwnerSnapshotAck&) noexcept;
     [[nodiscard]] bool begin_compile(PolicySnapshot = {},
                                      CapabilityRegistrySnapshot = {}) noexcept;
     void finish_compile(CompileResult) noexcept;
