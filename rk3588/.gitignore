@@ -1,5 +1,6 @@
 # Build outputs
 *.o
+*.d
 main
 
 # Local backup/temp files

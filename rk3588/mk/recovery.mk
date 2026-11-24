@@ -16,7 +16,7 @@ RECOVERY_PRODUCTION_DEPFILES := $(RECOVERY_PRODUCTION_OBJECTS:.o=.d)
 RECOVERY_TEST_BINARY := $(RECOVERY_BUILD_DIR)/recovery_tests
 RECOVERY_LDLIBS := -lcrypto
 
-.PHONY: recovery-print-config recovery-test recovery-compile-fail-test recovery-sanitize-test recovery-cross-check
+.PHONY: recovery-print-config recovery-test recovery-compile-fail-test recovery-sanitize-test recovery-cross-check recovery-task4-boundary recovery-task5-boundary
 
 recovery-print-config:
 	@echo "RECOVERY_CXX_STANDARD=$(RECOVERY_CXX_STANDARD)"
@@ -35,9 +35,45 @@ recovery-sanitize-test:
 
 recovery-cross-check:
 	$(ROOT_DIR)/tests/test_recovery_task3_boundary.sh
+	$(MAKE) recovery-task4-boundary
+	$(MAKE) recovery-task5-boundary
 	HOST_CXX="$(HOST_CXX)" CROSS_COMPILE="$(CROSS_COMPILE)" \
 		RECOVERY_CROSS_CXX="$(CXX)" RECOVERY_SYSROOT="$(SYSROOT)" \
 		$(ROOT_DIR)/tests/test_recovery_digest_probe.sh
+
+recovery-task4-boundary:
+	@if rg -n '#include[[:space:]]*<(sys/wait\.h|poll\.h)>|\b(waitid|poll)[[:space:]]*\(' \
+		$(RECOVERY_INCLUDE_DIR)/recovery/runtime.hpp $(RECOVERY_SOURCE_DIR)/runtime.cc; then \
+		echo "FAIL: Task 5 observation primitive leaked into Task 4 runtime" >&2; exit 1; \
+	else \
+		echo "PASS: Task 4 runtime contains no waitid/poll/<sys/wait.h>"; \
+	fi
+	@if sed -n '/struct RecoveryInstanceRuntime/,/^};/p' $(RECOVERY_INCLUDE_DIR)/recovery/runtime.hpp \
+		| rg -n 'fault_batch_open|fault_batch_cutoff|fault_batch_digest'; then \
+		echo "FAIL: duplicate fault-batch close state remains in RecoveryInstanceRuntime" >&2; exit 1; \
+	else \
+		echo "PASS: RecoveryInstanceRuntime has only the collecting fault_batch"; \
+	fi
+	@if rg -n 'FaultReportToken|ReporterId|last_report_seq|fault_content_digest' \
+		$(RECOVERY_INCLUDE_DIR)/recovery $(RECOVERY_SOURCE_DIR); then \
+		echo "FAIL: deleted replay/dedup kernel state remains in recovery sources" >&2; exit 1; \
+	else \
+		echo "PASS: kernel recovery sources contain no replay-token state"; \
+	fi
+
+recovery-task5-boundary:
+	@if rg -n '#include[[:space:]]*<(sys/wait\.h|poll\.h)>|\b(waitid|poll)[[:space:]]*\(' \
+		$(RECOVERY_SOURCE_DIR) --glob '!proof.cc'; then \
+		echo "FAIL: process-exit observation primitive leaked outside proof.cc" >&2; exit 1; \
+	else \
+		echo "PASS: waitid/poll are isolated to proof.cc"; \
+	fi
+	@if ! rg -n '#include[[:space:]]*<(sys/wait\.h|poll\.h)>|\b(waitid|poll)[[:space:]]*\(' \
+		$(RECOVERY_SOURCE_DIR)/proof.cc; then \
+		echo "FAIL: proof.cc does not own the process-exit observation primitive" >&2; exit 1; \
+	else \
+		echo "PASS: proof.cc owns the process-exit observation primitive"; \
+	fi
 
 $(RECOVERY_TEST_BINARY): $(RECOVERY_TEST_OBJECTS) $(RECOVERY_PRODUCTION_OBJECTS)
 	$(HOST_CXX) $(RECOVERY_CXXFLAGS) -o $@ $^ $(RECOVERY_LDLIBS)

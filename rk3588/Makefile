@@ -91,6 +91,12 @@ all: check-env $(TARGET)
 $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+# 独立存储自检程序：不碰相机/NPU/编码，可在板上单独验证本地存储是否可用。
+.PHONY: store-debug
+store-debug: store_debug.o local_store.o
+	$(CC) $(LDFLAGS) -o store_debug $^ -lsqlite3 -lpthread -lm
+	@echo "built: store_debug"
+
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -151,8 +157,21 @@ test:
 	bash tests/test_sdk_setup.sh
 	bash tests/test_optional_deps_build.sh
 
+# 视频分片存储自检：local_store + video_store 串联，不依赖相机/编码器。
+.PHONY: store-video-test
+store-video-test: store_video_test.o local_store.o video_store.o
+	$(CC) $(LDFLAGS) -o store_video_test $^ -lsqlite3 -lpthread -lm
+	@echo "built: store_video_test"
+
+# 编码器/推流初始化自检：复现 streamer_init 崩溃，不依赖相机。
+.PHONY: encoder-test
+encoder-test: encoder_test.o encoder.o osd_cache.o
+	$(CC) $(LDFLAGS) -o encoder_test $^ -lavformat -lavcodec -lswresample -lavutil \
+	  -lrga -lrockchip_mpp -ldrm -lfreetype -lm -lpthread -ldl
+	@echo "built: encoder_test"
+
 clean:
-	rm -f $(OBJS) $(DEPS) $(TARGET)
+	rm -f $(OBJS) $(DEPS) $(TARGET) store_debug store_debug.o store_video_test store_video_test.o encoder_test encoder_test.o
 
 include $(ROOT_DIR)/mk/recovery.mk
 

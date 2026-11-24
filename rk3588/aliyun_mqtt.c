@@ -1729,9 +1729,7 @@ void mqtt_request_immediate_ai_report(uint8_t ai_detect_state) {
 }
 
 void mqtt_update_zone_detection_result(int ok) {
-    pthread_mutex_lock(&g_zone_lock);
-    g_zone_detect_ok = ok ? 1 : 0;
-    pthread_mutex_unlock(&g_zone_lock);
+    (void)ok;
 }
 
 int mqtt_get_zone_confirm_enabled(void) {

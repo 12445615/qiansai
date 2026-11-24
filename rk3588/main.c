@@ -24,6 +24,9 @@
 #include <signal.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <poll.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/un.h>
 #include <time.h>
 #include <RgaApi.h>
@@ -32,9 +35,13 @@
 #include "audio_alert.h"//加入语音
 
 #define VIDEO_DEV "/dev/video11"
-#define RTMP_URL "rtmp://10.139.8.231:1935/fire_live/test"
-#define WIDTH  1280
-#define HEIGHT 720
+#define RTMP_URL "rtmp://192.168.1.101:1935/live/test"
+/* 采集尺寸（V4L2 dma-buf）：sensor 60fps 隔行模式原始输出 */
+#define WIDTH  1920
+#define HEIGHT 1080
+/* 编码/输出尺寸：由 RGA 做 2:1 缩放，等价于两行平均，可消掉隔行条纹 */
+#define ENC_WIDTH  1920
+#define ENC_HEIGHT 1080
 #define BUF_COUNT 4
 #define FRAME_SIZE (WIDTH * HEIGHT * 3 / 2)
 #define SENSOR_DEVICE_ENV "SENSOR_MODBUS_DEV"
@@ -49,10 +56,21 @@
 #define CAMERA_SENSOR_LOCK_INTERVAL_MS 5000
 #define STREAM_RESTART_BASE_MS 1000
 #define STREAM_RESTART_MAX_MS 30000
+/* child 必须在这么多毫秒内回 ACK，否则当作卡死（RTMP 连接超时可达数秒） */
+#define STREAM_ACK_TIMEOUT_MS 1000
+/* 新 spawn 的 child 还要先做 RTMP 连接（不可达时要等到 TCP 超时）才可能回 ACK，
+ * 第一次 ACK 给更长的宽限，否则会在它切到本地文件模式之前就被杀掉 */
+#define STREAM_ACK_FIRST_TIMEOUT_MS 8000
+/* SIGTERM 之后给 child 的宽限期，超时直接 SIGKILL，避免僵死 child 堆积 */
+#define STREAM_CHILD_TERM_GRACE_MS 3000
+/* 连续稳定出流这么久，才认为之前计数器的失败可以清掉（指数退避复位） */
+#define STREAM_HEALTHY_UPTIME_MS 30000
 #define STREAM_FPS_ENV "CAMERA_FLOW_STREAM_FPS"
-#define STREAM_FPS_DEFAULT 30
+#define STREAM_FPS_DEFAULT 60
 #define STREAM_DUP_FRAMES_ENV "CAMERA_FLOW_DUP_FRAMES"
 #define STREAM_DUP_FRAMES_DEFAULT 1
+/* RTMP 可达性探测的超时：只用来判断端口通不通，不参与真实推流 */
+#define RTMP_PROBE_TIMEOUT_MS 200
 #define CHILD_RTMP_RETRY_BASE_MS 1000
 #define CHILD_RTMP_RETRY_MAX_MS 30000
 #define CHILD_TARGET_RECORD_GRACE_MS 3000
@@ -61,6 +79,7 @@
 #define AI_ENABLE_ENV "CAMERA_FLOW_AI_ENABLE"
 #define AI_MODEL_PATH_ENV "CAMERA_FLOW_AI_MODEL_PATH"
 #define AI_INTERVAL_ENV "CAMERA_FLOW_AI_INTERVAL"
+#define AI_CTX_ENV "CAMERA_FLOW_AI_CTX"
 #define AI_CONF_ENV "CAMERA_FLOW_AI_CONF"
 #define AI_NMS_ENV "CAMERA_FLOW_AI_NMS"
 #define AI_STATS_INTERVAL_MS 5000
@@ -119,6 +138,9 @@ typedef struct {
     int current_restart_ms;
     int restart_fail_count;
     int64_t last_restart_mono_ms;
+    int64_t online_since_mono_ms;
+    int64_t child_term_mono_ms;
+    int ack_pending_after_spawn;
 } StreamState;
 
 typedef enum {
@@ -500,6 +522,7 @@ static int ai_pipeline_start(AiPipeline *ai, DetectSharedState *detect_state) {
     if (model_path != NULL && model_path[0] != '\0') {
         config.model_path = model_path;
     }
+    config.num_ctx = env_to_positive_int(AI_CTX_ENV, 3);
     config.camera_width = WIDTH;
     config.camera_height = HEIGHT;
     config.detect_state = detect_state;
@@ -1558,6 +1581,46 @@ static int video_uploader_macro_ready(char *reason, size_t reason_size) {
     return 0;
 }
 
+/*
+ * 收 child 的 ACK：poll 带超时，返回 1=收到，0=超时，-1=连接异常。
+ * 裸 read() 是阻塞的：child 卡在 RTMP 连接里时会把父进程整条采集循环一起挂住，
+ * 实测 capture_fps 从 60 掉到 1。
+ */
+static int wait_stream_ack(int fd, int timeout_ms) {
+    struct pollfd pfd;
+    int rc;
+    char ack;
+
+    if (fd < 0) {
+        return -1;
+    }
+
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+
+    do {
+        rc = poll(&pfd, 1, timeout_ms);
+    } while (rc < 0 && errno == EINTR);
+
+    if (rc < 0) {
+        return -1;
+    }
+    if (rc == 0) {
+        return 0;
+    }
+    if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+        return -1;
+    }
+    if ((pfd.revents & POLLIN) == 0) {
+        return 0;
+    }
+    if (read(fd, &ack, 1) != 1) {
+        return -1;
+    }
+    return 1;
+}
+
 static void mark_stream_offline(StreamState *stream) {
     pid_t ret = 0;
 
@@ -1570,10 +1633,16 @@ static void mark_stream_offline(StreamState *stream) {
         ret = waitpid(stream->child_pid, NULL, WNOHANG);
         if (ret == stream->child_pid) {
             stream->child_pid = -1;
+        } else if (ret == 0) {
+            /* child 还活着：先礼后兵，超时由 try_restart_stream_child 补 SIGKILL */
+            kill(stream->child_pid, SIGTERM);
+            stream->child_term_mono_ms = mono_now_ms();
         }
     }
 
     stream->stream_online = 0;
+    stream->online_since_mono_ms = 0;
+    stream->ack_pending_after_spawn = 0;
     stream->last_restart_mono_ms = mono_now_ms();
 }
 
@@ -1616,18 +1685,46 @@ static void child_reset_streamer(ChildOutputCtx *ctx) {
     ctx->streamer_ready = 0;
 }
 
+/* 流/编码帧率统一以驱动实际帧率为准；驱动未报告时才回落到环境变量默认值 */
+static int stream_fps_resolved(void)
+{
+    static int cached = 0;
+    double f;
+
+    if (cached > 0) {
+        return cached;
+    }
+    f = camera_query_actual_fps();
+    if (f >= 1.0) {
+        cached = (int)(f + 0.5);
+        printf("[FPS] driver actual %.2f fps -> stream/encode %d fps\n", f, cached);
+    } else {
+        cached = env_to_positive_int(STREAM_FPS_ENV, STREAM_FPS_DEFAULT);
+        printf("[FPS] driver reports no interval, fallback to %d fps\n", cached);
+    }
+    return cached;
+}
+
 static int child_open_rtmp_output(ChildOutputCtx *ctx) {
+    int64_t rtmp_open_start_ms = mono_now_ms();
+    int64_t rtmp_open_cost_ms;
+
     child_reset_streamer(ctx);
 
-    if (streamer_init(&ctx->streamer, RTMP_URL, WIDTH, HEIGHT, env_to_positive_int(STREAM_FPS_ENV, STREAM_FPS_DEFAULT)) < 0) {
-        fprintf(stderr, "[Child] Streamer init failed for RTMP\n");
+    if (streamer_init(&ctx->streamer, RTMP_URL, ENC_WIDTH, ENC_HEIGHT, stream_fps_resolved()) < 0) {
+        rtmp_open_cost_ms = mono_now_ms() - rtmp_open_start_ms;
+        fprintf(stderr, "[Child] Streamer init failed for RTMP after %lld ms\n",
+                (long long)rtmp_open_cost_ms);
         child_reset_streamer(ctx);
         return -1;
     }
 
+    streamer_set_src_size(&ctx->streamer, WIDTH, HEIGHT);
     ctx->streamer_ready = 1;
     ctx->mode = CHILD_OUTPUT_RTMP;
     child_reset_rtmp_backoff(ctx);
+    rtmp_open_cost_ms = mono_now_ms() - rtmp_open_start_ms;
+    printf("[Child] RTMP output ready in %lld ms\n", (long long)rtmp_open_cost_ms);
     return 0;
 }
 
@@ -1713,13 +1810,14 @@ static int child_open_file_segment(ChildOutputCtx *ctx,
     }
 
     child_reset_streamer(ctx);
-    if (streamer_init(&ctx->streamer, segment_path, WIDTH, HEIGHT, env_to_positive_int(STREAM_FPS_ENV, STREAM_FPS_DEFAULT)) < 0) {
+    if (streamer_init(&ctx->streamer, segment_path, ENC_WIDTH, ENC_HEIGHT, stream_fps_resolved()) < 0) {
         fprintf(stderr, "[Child] Streamer init failed for local segment\n");
         local_store_delete_video_segment(&ctx->store, segment_id);
         child_reset_streamer(ctx);
         return -1;
     }
 
+    streamer_set_src_size(&ctx->streamer, WIDTH, HEIGHT);
     ctx->streamer_ready = 1;
     ctx->mode = CHILD_OUTPUT_FILE;
     ctx->current_segment_id = segment_id;
@@ -1866,6 +1964,11 @@ static int child_update_target_recording(ChildOutputCtx *ctx,
         return 0;
     }
 
+    /* FILE 模式主路已经在落本地分片，再开 side record 就是同一路流写两遍（同一秒还会撞同名文件） */
+    if (ctx->mode != CHILD_OUTPUT_RTMP) {
+        return 0;
+    }
+
     if (has_target) {
         ctx->record_target_last_seen_mono_ms = frame_mono_ms;
     }
@@ -1903,6 +2006,12 @@ static int child_update_target_recording(ChildOutputCtx *ctx,
 static int child_switch_to_file_mode(ChildOutputCtx *ctx,
                                      int64_t frame_mono_ms,
                                      int64_t frame_wall_ms) {
+    /* side record 依赖 RTMP 模式的 streamer：切模式前必须收掉，
+     * 否则本地文件模式里主路和 side record 会往同一个路径写两份，DB 也会出现重复行。 */
+    if (ctx->record_streamer_ready) {
+        child_close_record_segment(ctx, 0);
+    }
+
     if (ctx->streamer_ready) {
         streamer_clean(&ctx->streamer);
         child_reset_streamer(ctx);
@@ -1913,6 +2022,96 @@ static int child_switch_to_file_mode(ChildOutputCtx *ctx,
     child_reset_rtmp_backoff(ctx);
 
     return child_open_file_segment(ctx, frame_wall_ms, frame_mono_ms);
+}
+
+/*
+ * RTMP 端点的廉价可达性探测（只看 TCP 端口，不做 RTMP 握手）。
+ *
+ * 背景：avformat 打开 rtmp:// 时如果对端不可达，会重试到约 5 s 才放弃；这个阻塞发生在
+ * child 的帧循环里，期间 child 无法回 ACK，父进程的 STREAM_ACK_TIMEOUT_MS（1 s）就会把
+ * 这个本来健康的 child 直接判死。所以先用 200 ms 的 connect 探一下，不通就跳过本次恢复尝试。
+ *
+ * 返回 1=端口可连，0=不可达/超时，-1=参数不支持（例如域名，交给原路径处理）。
+ */
+static int rtmp_endpoint_reachable(const char *url, int timeout_ms) {
+    char host[128];
+    int port = 1935;
+    struct sockaddr_in addr;
+    struct pollfd pfd;
+    const char *p;
+    size_t host_len = 0;
+    socklen_t err_len = sizeof(int);
+    int fd;
+    int flags;
+    int rc;
+    int so_err = 0;
+
+    if (url == NULL || url[0] == '\0') {
+        return -1;
+    }
+
+    p = strstr(url, "://");
+    p = (p != NULL) ? p + 3 : url;
+
+    while (*p != '\0' && *p != '/' && *p != ':' && host_len + 1 < sizeof(host)) {
+        host[host_len++] = *p++;
+    }
+    host[host_len] = '\0';
+
+    if (*p == ':') {
+        port = atoi(p + 1);
+    }
+    if (host[0] == '\0' || port <= 0 || port > 65535) {
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        /* 只支持点分 IP；域名留给原来的打开路径 */
+        return -1;
+    }
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+
+    rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno == EINPROGRESS) {
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+
+        do {
+            rc = poll(&pfd, 1, timeout_ms);
+        } while (rc < 0 && errno == EINTR);
+
+        if (rc == 0) {
+            close(fd);
+            return 0;
+        }
+        if (rc < 0) {
+            close(fd);
+            return -1;
+        }
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &err_len) < 0 || so_err != 0) {
+            close(fd);
+            return 0;
+        }
+    } else if (rc < 0) {
+        close(fd);
+        return 0;
+    }
+
+    close(fd);
+    return 1;
 }
 
 static int child_rotate_or_restore_output(ChildOutputCtx *ctx,
@@ -1931,14 +2130,19 @@ static int child_rotate_or_restore_output(ChildOutputCtx *ctx,
     child_close_file_segment(ctx, 0);
 
     if (frame_mono_ms - ctx->last_rtmp_retry_mono_ms >= ctx->rtmp_retry_backoff_ms) {
+        int reachable;
+
         ctx->last_rtmp_retry_mono_ms = frame_mono_ms;
-        if (child_open_rtmp_output(ctx) == 0) {
+        reachable = rtmp_endpoint_reachable(RTMP_URL, RTMP_PROBE_TIMEOUT_MS);
+
+        if (reachable == 1 && child_open_rtmp_output(ctx) == 0) {
             printf("[Child] RTMP output restored.\n");
             return 0;
         }
 
         child_increase_rtmp_backoff(ctx);
-        printf("[Child] RTMP restore failed, next backoff=%d ms.\n",
+        printf("[Child] RTMP restore skipped (%s), next backoff=%d ms.\n",
+               reachable == 1 ? "open failed" : "endpoint unreachable",
                ctx->rtmp_retry_backoff_ms);
     }
 
@@ -1975,6 +2179,9 @@ static int child_push_frame_repeated(ChildOutputCtx *ctx,
 }
 
 static int child_stream_loop(int sock, DetectSharedState *detect_state, ZoneOverlayState *zone_state) {
+    /* 重定向到文件时 stdout 是全缓冲：child 被 SIGKILL 时缓冲区里的日志会整段丢失，
+     * 排查分片/推流问题时误导性极强，这里改成行缓冲。 */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     ChildOutputCtx ctx;
     int64_t frame_mono_ms;
     int64_t frame_wall_ms;
@@ -1993,7 +2200,7 @@ static int child_stream_loop(int sock, DetectSharedState *detect_state, ZoneOver
     if (duplicate_frames < 1) duplicate_frames = 1;
     printf("[Child] stream duplicate_frames=%d target_fps=%d\n",
            duplicate_frames,
-           env_to_positive_int(STREAM_FPS_ENV, STREAM_FPS_DEFAULT));
+           stream_fps_resolved());
 
     ctx.debug_rtmp_fail_after_frames = env_to_positive_int("CAMERA_FLOW_DEBUG_RTMP_FAIL_AFTER_FRAMES", 0);
     if (ctx.debug_rtmp_fail_after_frames > 0) {
@@ -2151,7 +2358,9 @@ static int spawn_stream_child(StreamState *stream) {
     stream->parent_sock = sv[0];
     stream->child_pid = pid;
     stream->stream_online = 1;
-    reset_restart_backoff(stream);
+    stream->online_since_mono_ms = mono_now_ms();
+    stream->child_term_mono_ms = 0;
+    stream->ack_pending_after_spawn = 1;
     stream->last_restart_mono_ms = mono_now_ms();
 
     printf("[Parent] Stream child started: pid=%d\n", pid);
@@ -2170,10 +2379,22 @@ static void try_restart_stream_child(StreamState *stream) {
     if (stream->child_pid > 0) {
         ret = waitpid(stream->child_pid, &status, WNOHANG);
         if (ret == 0) {
+            if (stream->child_term_mono_ms > 0 &&
+                mono_now_ms() - stream->child_term_mono_ms >= STREAM_CHILD_TERM_GRACE_MS) {
+                fprintf(stderr,
+                        "[Parent] stream child %d ignores SIGTERM for %d ms, sending SIGKILL.\n",
+                        (int)stream->child_pid,
+                        STREAM_CHILD_TERM_GRACE_MS);
+                kill(stream->child_pid, SIGKILL);
+                waitpid(stream->child_pid, &status, 0);
+                stream->child_pid = -1;
+                stream->child_term_mono_ms = 0;
+            }
             return;
         }
         if (ret == stream->child_pid) {
             stream->child_pid = -1;
+            stream->child_term_mono_ms = 0;
         }
     }
 
@@ -2271,7 +2492,8 @@ int main(void) {
 
     camera_sensor_lock_fps_controls();
 
-    if (camera_init(&cam, VIDEO_DEV, WIDTH, HEIGHT) < 0) {
+    if (camera_init(&cam, VIDEO_DEV, WIDTH, HEIGHT,
+                    env_to_positive_int(STREAM_FPS_ENV, STREAM_FPS_DEFAULT)) < 0) {
         fprintf(stderr, "Failed to init camera\n");
         exit(1);
     }
@@ -2404,13 +2626,32 @@ int main(void) {
                 fprintf(stderr, "[Parent] send_fd failed, mark stream offline.\n");
                 mark_stream_offline(&stream);
             } else {
-                char ack;
-                if (read(stream.parent_sock, &ack, 1) <= 0) {
+                int ack_timeout_ms = stream.ack_pending_after_spawn ?
+                                     STREAM_ACK_FIRST_TIMEOUT_MS :
+                                     STREAM_ACK_TIMEOUT_MS;
+                int ack = wait_stream_ack(stream.parent_sock, ack_timeout_ms);
+
+                if (ack < 0) {
                     stream_failures++;
                     fprintf(stderr, "[Parent] ACK failed, mark stream offline.\n");
                     mark_stream_offline(&stream);
+                } else if (ack == 0) {
+                    stream_failures++;
+                    fprintf(stderr,
+                            "[Parent] ACK timeout after %d ms, mark stream offline.\n",
+                            ack_timeout_ms);
+                    mark_stream_offline(&stream);
                 } else {
+                    stream.ack_pending_after_spawn = 0;
                     stream_frames++;
+                    if (stream.restart_fail_count > 0 &&
+                        stream.online_since_mono_ms > 0 &&
+                        frame_mono_ms - stream.online_since_mono_ms >=
+                            STREAM_HEALTHY_UPTIME_MS) {
+                        printf("[Parent] stream stable for %d ms, reset restart backoff.\n",
+                               STREAM_HEALTHY_UPTIME_MS);
+                        reset_restart_backoff(&stream);
+                    }
                 }
             }
         }

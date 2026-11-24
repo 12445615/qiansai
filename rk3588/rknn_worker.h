@@ -23,6 +23,7 @@ typedef struct {
 
 typedef struct {
     const char *model_path;
+    int num_ctx;        /* 并行 RKNN 上下文数（= NPU 核心数），1 表示单核 */
     int camera_width;
     int camera_height;
     DetectSharedState *detect_state;
