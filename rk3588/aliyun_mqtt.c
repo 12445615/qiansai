@@ -485,7 +485,7 @@ static int build_sensor_payload(char *payload,
     if (ai_detect_state == 0) {
         g_last_ai_none_report_ms = created_at_ms;
     } else {
-        printf("[闃块噷浜慮 AiDetectState=%d will be reported\n", ai_detect_state);
+        printf("[Aliyun] AiDetectState=%d will be reported\n", ai_detect_state);
     }
 
 
@@ -564,7 +564,7 @@ static int mqtt_connect_client(MQTTClient client) {
 
     if (rc == MQTTCLIENT_SUCCESS) {
 
-        printf("[闃块噷浜慮 宸茶繛鎺ワ紝寮€濮嬩笂浼犲苟琛ュ彂绂荤嚎鏁版嵁銆俓n");
+        printf("[Aliyun] connected; uploading and resending offline data\n");
 
         rc = MQTTClient_subscribe(client, ZONE_CONTROL_TOPIC, 0);
         if (rc == MQTTCLIENT_SUCCESS) {
@@ -579,7 +579,7 @@ static int mqtt_connect_client(MQTTClient client) {
 
 
 
-    printf("[闃块噷浜戦敊璇痌 杩炴帴澶辫触锛岃繑鍥炵爜: %d\n", rc);
+    printf("[Aliyun error] connect failed, rc=%d\n", rc);
 
     return rc;
 
@@ -617,7 +617,7 @@ static int enqueue_offline_record(LocalStore *store,
 
     if (!store_ready) {
 
-        fprintf(stderr, "[绂荤嚎缂撳瓨] 涓嶅彲鐢紝褰撳墠鏁版嵁鏃犳硶钀界洏銆俓n");
+        fprintf(stderr, "[Offline cache] unavailable; current data cannot be persisted\n");
 
         return ENOSYS;
 
@@ -647,7 +647,7 @@ static int enqueue_offline_record(LocalStore *store,
 
     if (rc != 0) {
 
-        fprintf(stderr, "[绂荤嚎缂撳瓨] 鍐欏叆澶辫触: %d\n", rc);
+        fprintf(stderr, "[Offline cache] write failed: %d\n", rc);
 
         return rc;
 
@@ -655,7 +655,7 @@ static int enqueue_offline_record(LocalStore *store,
 
 
 
-    printf("[绂荤嚎缂撳瓨] 宸蹭繚瀛樹竴鏉＄绾胯褰曘€俓n");
+    printf("[Offline cache] saved one record\n");
 
     return 0;
 
@@ -677,7 +677,7 @@ static int flush_offline_records(LocalStore *store, MQTTClient client) {
 
     if (rc != 0) {
 
-        fprintf(stderr, "[绂荤嚎缂撳瓨] 璇诲彇寰呰ˉ鍙戣褰曞け璐? %d\n", rc);
+        fprintf(stderr, "[Offline cache] failed to read pending resend records: %d\n", rc);
 
         return 0;
 
@@ -691,7 +691,7 @@ static int flush_offline_records(LocalStore *store, MQTTClient client) {
 
         if (rc != MQTTCLIENT_SUCCESS) {
 
-            printf("[绂荤嚎琛ュ彂] 琛ュ彂澶辫触锛岃繑鍥炵爜: %d\n", rc);
+            printf("[Offline resend] resend failed, rc=%d\n", rc);
 
             return -1;
 
@@ -703,7 +703,7 @@ static int flush_offline_records(LocalStore *store, MQTTClient client) {
 
         if (rc != 0) {
 
-            fprintf(stderr, "[绂荤嚎缂撳瓨] 鍒犻櫎宸茶ˉ鍙戣褰曞け璐?id=%lld, err=%d\n",
+            fprintf(stderr, "[Offline cache] failed to delete resent record: id=%lld, err=%d\n",
 
                     (long long)records[i].id, rc);
 
@@ -713,7 +713,7 @@ static int flush_offline_records(LocalStore *store, MQTTClient client) {
 
 
 
-        printf("[绂荤嚎琛ュ彂] 鎴愬姛琛ュ彂 id=%lld\n", (long long)records[i].id);
+        printf("[Offline resend] successfully resent id=%lld\n", (long long)records[i].id);
 
     }
 
@@ -747,7 +747,7 @@ static int send_or_enqueue_payload(LocalStore *store,
 
     if (g_mqtt_force_offline) {
 
-        printf("[MQTTDebug] force_offline=1锛屽綋鍓嶆秷鎭洿鎺ュ啓鍏ョ绾跨紦瀛樸€俓n");
+        printf("[MQTTDebug] force_offline=1, current message written directly to offline cache\n");
 
         return enqueue_offline_record(store, store_ready, created_at_ms, snapshot, payload);
 
@@ -773,7 +773,7 @@ static int send_or_enqueue_payload(LocalStore *store,
 
         if (rc == MQTTCLIENT_SUCCESS) {
 
-           // printf("[闃块噷浜慮 褰撳墠鏁版嵁涓婃姤鎴愬姛銆俓n");
+           // printf("[Aliyun] current data reported successfully\n");
 
             return 0;
 
@@ -781,7 +781,7 @@ static int send_or_enqueue_payload(LocalStore *store,
 
 
 
-        printf("[闃块噷浜戦敊璇痌 褰撳墠鏁版嵁涓婃姤澶辫触锛岃繑鍥炵爜: %d\n", rc);
+        printf("[Aliyun error] current data report failed, rc=%d\n", rc);
 
         mqtt_disconnect_client(client, mqtt_connected);
 
@@ -1030,7 +1030,7 @@ static int mqtt_debug_flush_offline_once_internal(const char *root_dir) {
 
     if (g_mqtt_force_offline) {
 
-        printf("[MQTTDebug] force_offline=1锛岃烦杩囪ˉ鍙戙€俓n");
+        printf("[MQTTDebug] force_offline=1, skip resend\n");
 
         return 0;
 
@@ -1132,7 +1132,7 @@ static void *mqtt_thread_func(void *arg) {
 
 
 
-    printf("[闃块噷浜慮 MQTT 绾跨▼鍚姩锛屽噯澶囪繛鎺?..\n");
+    printf("[Aliyun] MQTT thread started, connecting...\n");
 
 
 
@@ -1140,13 +1140,13 @@ static void *mqtt_thread_func(void *arg) {
 
     if (rc != 0) {
 
-        fprintf(stderr, "[绂荤嚎缂撳瓨] 鍒濆鍖栧け璐? %d\n", rc);
+        fprintf(stderr, "[Offline cache] init failed: %d\n", rc);
 
     } else {
 
         store_ready = 1;
 
-        printf("[绂荤嚎缂撳瓨] SQLite 宸插氨缁? %s\n", store.db_path);
+        printf("[Offline cache] SQLite ready: %s\n", store.db_path);
 
     }
 
@@ -1156,7 +1156,7 @@ static void *mqtt_thread_func(void *arg) {
 
     if (rc != MQTTCLIENT_SUCCESS) {
 
-        fprintf(stderr, "[闃块噷浜戦敊璇痌 鍒涘缓瀹㈡埛绔け璐ワ紝杩斿洖鐮? %d\n", rc);
+        fprintf(stderr, "[Aliyun error] failed to create client, rc=%d\n", rc);
 
         client = NULL;
 
@@ -1200,7 +1200,8 @@ static void *mqtt_thread_func(void *arg) {
 
 
 
-    printf("[闃块噷浜慮 瀹氭椂涓婃姤宸插惎鍔紝姣?d绉掕Е鍙戜竴娆°€俓n", MQTT_REPORT_INTERVAL_SEC);
+    printf("[Aliyun MQTT] periodic reporting started, interval=%d seconds\n",
+           MQTT_REPORT_INTERVAL_SEC);
 
 
 
@@ -1307,7 +1308,7 @@ static void *mqtt_thread_func(void *arg) {
 
             if (rc != 0) {
 
-                fprintf(stderr, "[闃块噷浜戦敊璇痌 鏋勯€?payload 澶辫触: %d\n", rc);
+                fprintf(stderr, "[Aliyun error] failed to build payload: %d\n", rc);
 
                 continue;
 
@@ -1333,7 +1334,7 @@ static void *mqtt_thread_func(void *arg) {
 
                 if (rc < 0) {
 
-                    printf("[闃块噷浜慮 琛ュ彂杩囩▼涓帀绾匡紝褰撳墠鏁版嵁杞叆绂荤嚎缂撳瓨銆俓n");
+                    printf("[Aliyun] resend interrupted; current data moved to offline cache\n");
 
                     mqtt_disconnect_client(client, &mqtt_connected);
 
@@ -1361,7 +1362,7 @@ static void *mqtt_thread_func(void *arg) {
 
             if (rc != 0) {
 
-                fprintf(stderr, "[闃块噷浜戦敊璇痌 褰撳墠鏁版嵁鍐欏叆鍙戦€侀摼璺け璐? %d\n", rc);
+                fprintf(stderr, "[Aliyun error] failed to write current data to send link: %d\n", rc);
 
             }
 
@@ -1729,9 +1730,7 @@ void mqtt_request_immediate_ai_report(uint8_t ai_detect_state) {
 }
 
 void mqtt_update_zone_detection_result(int ok) {
-    pthread_mutex_lock(&g_zone_lock);
-    g_zone_detect_ok = ok ? 1 : 0;
-    pthread_mutex_unlock(&g_zone_lock);
+    (void)ok;
 }
 
 int mqtt_get_zone_confirm_enabled(void) {

@@ -2,6 +2,7 @@
 #define LOCAL_STORE_H
 
 #include <limits.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct sqlite3 sqlite3;
@@ -51,6 +52,18 @@ typedef struct {
 } LocalVideoSegmentRecord;
 
 int local_store_open(LocalStore *store, const char *root_dir);
+
+/*
+ * 存储根目录解析。
+ *
+ * 顺序：CAMERA_FLOW_STORE_DIR → 自动探测可写的可移除挂载点（SD 卡/U 盘，按剩余空间择优）
+ *       → 板载数据分区（/userdata、/data、/var/lib，按剩余空间择优）→ /tmp 兜底。
+ * 每一步都会真的写一个探针文件，mkdir 成功不代表可写（只读挂载、满盘、悬空软链都会在写时才暴露）。
+ * 解析结果在进程内缓存一次，保证 LocalStore / VideoStore / VideoUploader 落在同一个根目录。
+ * 成功返回 0，失败返回 errno 风格错误码。
+ */
+int local_store_resolve_root(char *out, size_t out_size);
+const char *local_store_resolve_root_cached(void);
 void local_store_close(LocalStore *store);
 int local_store_enqueue(LocalStore *store,
                         int64_t created_at_ms,

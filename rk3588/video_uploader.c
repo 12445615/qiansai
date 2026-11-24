@@ -261,10 +261,12 @@ static int video_uploader_copy_root_dir(VideoUploader *uploader, const char *roo
     size_t len;
 
     if (effective_root == NULL || effective_root[0] == '\0') {
-        effective_root = getenv("CAMERA_FLOW_STORE_DIR");
-    }
-    if (effective_root == NULL || effective_root[0] == '\0') {
-        effective_root = LOCAL_STORE_DEFAULT_ROOT;
+        /* 与 LocalStore / VideoStore 共用同一解析结果，避免上传器指着另一个分区找文件。 */
+        effective_root = local_store_resolve_root_cached();
+        if (effective_root == NULL) {
+            fprintf(stderr, "[VideoUploader] no usable store root, uploader disabled\n");
+            return ENODEV;
+        }
     }
 
     len = strlen(effective_root);

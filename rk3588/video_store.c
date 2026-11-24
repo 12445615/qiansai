@@ -149,10 +149,12 @@ int video_store_init(VideoStore *video_store,
     video_store->segment_duration_ms = video_store_env_i64("CAMERA_FLOW_VIDEO_SEGMENT_MS", video_store->segment_duration_ms);
 
     if (effective_root == NULL || effective_root[0] == '\0') {
-        effective_root = getenv("CAMERA_FLOW_STORE_DIR");
-    }
-    if (effective_root == NULL || effective_root[0] == '\0') {
-        effective_root = LOCAL_STORE_DEFAULT_ROOT;
+        /* 必须和 LocalStore 用同一个根目录，否则 DB 里的 file_path 与分片实际落盘位置会不一致。 */
+        effective_root = local_store_resolve_root_cached();
+        if (effective_root == NULL) {
+            fprintf(stderr, "[VideoStore] no usable store root, local recording disabled\n");
+            return ENODEV;
+        }
     }
 
     rc = video_store_copy_string(video_store->root_dir, sizeof(video_store->root_dir), effective_root);

@@ -45,6 +45,14 @@ static int64_t g_stream_start_ms = 0;
 
 
 
+void streamer_set_src_size(FFmpegStreamer *s, int src_width, int src_height) {
+    if (s == NULL || src_width <= 0 || src_height <= 0) {
+        return;
+    }
+    s->src_width = src_width;
+    s->src_height = src_height;
+}
+
 int streamer_init(FFmpegStreamer *s, const char *filename, int width, int height, int fps)
 
 {
@@ -52,12 +60,14 @@ int streamer_init(FFmpegStreamer *s, const char *filename, int width, int height
     const AVCodec *codec;
 
     int ret;
-
-
-
     s->width = width;
 
     s->height = height;
+
+    /* 默认源=输出；需要缩放时用 streamer_set_src_size() 覆盖 */
+    s->src_width = width;
+
+    s->src_height = height;
 
     s->frame_pts = 0;
     s->side_fmt_ctx = NULL;
@@ -69,7 +79,23 @@ int streamer_init(FFmpegStreamer *s, const char *filename, int width, int height
 
 
 
-    avformat_alloc_output_context2(&s->fmt_ctx, NULL, "flv", filename);
+    /*
+     * Muxer 必须按目标选：RTMP 走 flv，本地分片走 mpegts。
+     * 历史上这里无条件写死 "flv"，于是 video_store 里的 .ts 分片实际是 FLV 数据，
+     * 播放器和上传端按 mpegts 解析全部失败。
+     */
+    {
+        const char *out_format = NULL;
+        size_t name_len = strlen(filename);
+
+        if (strncmp(filename, "rtmp://", 7) == 0) {
+            out_format = "flv";
+        } else if (name_len > 3 && strcmp(filename + name_len - 3, ".ts") == 0) {
+            out_format = "mpegts";
+        }
+
+        avformat_alloc_output_context2(&s->fmt_ctx, NULL, out_format, filename);
+    }
 
     if (!s->fmt_ctx) {
 
@@ -81,7 +107,7 @@ int streamer_init(FFmpegStreamer *s, const char *filename, int width, int height
 
 
 
-    // ==== ���Ŀ��ӳ����� 1��ǿ��Ҫ�� FFmpeg �����κΰ���ѹ ====
+    // ==== Stream tuning 1: keep FFmpeg from adding any unnecessary re-encoding ====
 
     s->fmt_ctx->flags |= AVFMT_FLAG_FLUSH_PACKETS; 
     s->fmt_ctx->max_delay = 0; 
@@ -129,8 +155,8 @@ int streamer_init(FFmpegStreamer *s, const char *filename, int width, int height
     s->enc_ctx->framerate = (AVRational){fps, 1};
     
     // ========================================================
-    // ����ˢ���Ż���ʼ��
-    // 1. �޸� GOP ��СΪ 60��Լ����һ��I֡��������Ƶ���Ĵ��ˢ�µ��µĿ���
+    // Low-latency encoding tuning starts here.
+    // 1. Reduce GOP size to about half the frame rate to keep a fresh I-frame cadence.
     s->enc_ctx->gop_size = fps / 2;
     if (s->enc_ctx->gop_size < 1) {
         s->enc_ctx->gop_size = 1;
@@ -139,16 +165,16 @@ int streamer_init(FFmpegStreamer *s, const char *filename, int width, int height
     s->enc_ctx->max_b_frames = 0;
     s->enc_ctx->pix_fmt = AV_PIX_FMT_NV12;
     
-   // 1. �������������� 3Mbps����֤�ճ�������
+    // 1. Target bitrate is 3 Mbps to keep stable image quality under normal conditions.
     s->enc_ctx->bit_rate = 3000000; 
     
-    // 2. �����ġ�������ʷſ��� 6Mbps������������ͷ�����ƶ�ʱ����������������͸��̬���棡
+    // 2. Keep the max rate at 3 Mbps to avoid sudden bursts during motion or scene changes.
     s->enc_ctx->rc_max_rate = 3000000; 
     s->enc_ctx->rc_buffer_size = 200000;
 
-    // 3. �����ġ��ſ����ѹ���� (qmax)
-    // qmin ���� 18����֤��ֹ���漫��������
-    // qmax �������ߵ� 45���������̫�ͱ���32�������˶�ʱ���ʻᳬ�꣬Ӳ�������ֱ�ӱ������������ߺ�����Ǳ���ͣ���������˺�ѣ�
+    // 3. Tune quantization bounds: qmin/qmax keep the stream smooth while avoiding excessive quality loss.
+    // qmin is 18 to avoid over-compression artifacts.
+    // qmax is kept at 38; a lower value would raise bit rate too much, while a higher value may degrade motion quality.
     s->enc_ctx->qmin = 18;
     s->enc_ctx->qmax = 38;
     s->video_st->time_base = s->enc_ctx->time_base;
@@ -181,10 +207,6 @@ int streamer_init(FFmpegStreamer *s, const char *filename, int width, int height
 
 
 
-    s->sws_ctx = NULL;
-
-
-
     s->yuv_frame = av_frame_alloc();
 
     if (!s->yuv_frame) {
@@ -201,7 +223,10 @@ int streamer_init(FFmpegStreamer *s, const char *filename, int width, int height
 
     s->yuv_frame->width = width;
 
-    s->yuv_frame->height = 768;
+    /* 帧缓冲必须按真实高度申请：后面的 hstride / UV 偏移全部由 height 推导，
+     * 历史上这里写死过 1568 和 768（720p 时代的对齐高度），一旦分辨率变了
+     * 就会把 UV 平面写进 Y 平面里，RGA 也跟着用错 hstride。 */
+    s->yuv_frame->height = height;
 
 
 
@@ -225,7 +250,7 @@ int streamer_init(FFmpegStreamer *s, const char *filename, int width, int height
 
         av_dict_set(&opts, "rw_timeout", "2000000", 0); 
 
-        // ==== ���Ŀ��ӳ����� 2����������ײ�д���� ====
+        // ==== Stream open tuning 2: avoid buffering and keep writes near real time ====
 
         av_dict_set(&opts, "fflags", "nobuffer", 0); 
         av_dict_set(&opts, "flush_packets", "1", 0);
@@ -428,7 +453,7 @@ int streamer_push(FFmpegStreamer *s, uint8_t *nv12_data)
 
         
 
-        // ==== ���Ŀ��ӳ����� 3�����ٽ�֯�ȴ���Ƶ��ֱ�ӱ����������� ====
+        // ==== Stream open tuning 3: reduce packet delays so the video is sent immediately ====
 
         av_write_frame(s->fmt_ctx, pkt);
         streamer_write_side_packet(s, pkt);
@@ -497,7 +522,7 @@ static void nv12_fill_rect(FFmpegStreamer *s,
         memset(y_plane + (y + row) * s->yuv_frame->linesize[0] + x, y_value, width);
     }
 
-    uv_plane = s->yuv_frame->data[0] + s->yuv_frame->linesize[0] * 768;
+    uv_plane = s->yuv_frame->data[1];
     uv_x = x & ~1;
     uv_y = y & ~1;
     uv_w = align_even_up(width + (x - uv_x));
@@ -546,7 +571,7 @@ static void nv12_fill_rect_yuv(FFmpegStreamer *s,
         memset(y_plane + (y + row) * s->yuv_frame->linesize[0] + x, y_value, width);
     }
 
-    uv_plane = s->yuv_frame->data[0] + s->yuv_frame->linesize[0] * 768;
+    uv_plane = s->yuv_frame->data[1];
     uv_x = x & ~1;
     uv_y = y & ~1;
     uv_w = align_even_up(width + (x - uv_x));
@@ -757,7 +782,57 @@ static void draw_detect_zones(FFmpegStreamer *s,
 
 
 
+/* 采集坐标 → 输出坐标（例如 2112x1568 → 1056x784，比例 0.5） */
+static void scale_zone_rect(DetectZoneRect *r, float sx, float sy) {
+    if (r == NULL) return;
+    r->x1 *= sx; r->x2 *= sx;
+    r->y1 *= sy; r->y2 *= sy;
+    r->p0x *= sx; r->p0y *= sy;
+    r->p1x *= sx; r->p1y *= sy;
+    r->p2x *= sx; r->p2y *= sy;
+    r->p3x *= sx; r->p3y *= sy;
+}
+
+static void scale_detect_state(DetectSharedState *out, const DetectSharedState *in, float sx, float sy) {
+    int i;
+    int count;
+
+    *out = *in;
+    count = out->box_count;
+    if (count > DETECT_MAX_BOXES) count = DETECT_MAX_BOXES;
+    for (i = 0; i < count; i++) {
+        out->boxes[i].x1 *= sx; out->boxes[i].x2 *= sx;
+        out->boxes[i].y1 *= sy; out->boxes[i].y2 *= sy;
+    }
+    scale_zone_rect(&out->work_zone, sx, sy);
+    scale_zone_rect(&out->danger_zone, sx, sy);
+}
+
+static void scale_zone_state(ZoneOverlayState *out, const ZoneOverlayState *in, float sx, float sy) {
+    *out = *in;
+    scale_zone_rect(&out->work_zone, sx, sy);
+    scale_zone_rect(&out->danger_zone, sx, sy);
+}
+
 static void draw_detect_boxes(FFmpegStreamer *s, const DetectSharedState *detect_state, const ZoneOverlayState *zone_state) {
+    DetectSharedState scaled_detect;
+    ZoneOverlayState scaled_zone;
+
+    /* 采集尺寸 != 输出尺寸时，先把叠加坐标缩放到输出坐标系 */
+    if (s != NULL && s->src_width > 0 && s->src_height > 0 &&
+        (s->src_width != s->width || s->src_height != s->height)) {
+        float scale_x = (float)s->width / (float)s->src_width;
+        float scale_y = (float)s->height / (float)s->src_height;
+
+        if (detect_state != NULL) {
+            scale_detect_state(&scaled_detect, detect_state, scale_x, scale_y);
+            detect_state = &scaled_detect;
+        }
+        if (zone_state != NULL) {
+            scale_zone_state(&scaled_zone, zone_state, scale_x, scale_y);
+            zone_state = &scaled_zone;
+        }
+    }
 
     rga_buffer_t dst;
 
@@ -775,7 +850,7 @@ static void draw_detect_boxes(FFmpegStreamer *s, const DetectSharedState *detect
 
     dst.wstride = s->yuv_frame->linesize[0];
 
-    dst.hstride = 768;
+    dst.hstride = (int)s->height;
 
     draw_detect_zones(s, dst, zone_state);
 
@@ -903,42 +978,66 @@ int streamer_push_zerocopy_overlay(FFmpegStreamer *s, int dma_fd, const DetectSh
     static int64_t stat_total_ms = 0;
     static int64_t stat_max_ms = 0;
 
-    // ��̬����������ƽ����ֵ
+    // Smooth detection scores over time to reduce frame-to-frame jitter.
 
     static float smoothed_scores[6] = {-1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f};
 
 
 
-    if (dma_fd < 0 || !s->yuv_frame->data[0]) return -1;
+    if (dma_fd < 0 || !s->yuv_frame->data[0]) {
+        fprintf(stderr, "[Encoder] invalid frame: dma_fd=%d data0=%p\n",
+                dma_fd, (void *)(s->yuv_frame ? s->yuv_frame->data[0] : NULL));
+        return -1;
+    }
 
     push_start_ms = get_mono_time_ms();
     if (stat_start_ms == 0) stat_start_ms = push_start_ms;
 
-    // 1. �ڴ�׼�� (���ֶ���)
-
-    s->yuv_frame->height = 768;
+    // 1. Align the frame height to the expected output stride.
 
     ret = av_frame_make_writable(s->yuv_frame);
 
-    if (ret < 0) return -1;
+    if (ret < 0) {
+        fprintf(stderr, "[Encoder] frame not writable: %d\n", ret);
+        return -1;
+    }
 
-    s->yuv_frame->height = 720;
 
 
-
-    src = wrapbuffer_fd(dma_fd, s->width, s->height, RK_FORMAT_YCbCr_420_SP);
+    /* 源按采集尺寸 wrap，目标按输出尺寸：improcess 的 drect 小于 srect 时 RGA 会缩放，
+     * 2:1 缩放等价于两行平均，用来合并 sensor 60fps 隔行模式的两场（消条纹）。 */
+    src = wrapbuffer_fd(dma_fd, s->src_width, s->src_height, RK_FORMAT_YCbCr_420_SP);
 
     dst = wrapbuffer_virtualaddr(s->yuv_frame->data[0], s->width, s->height, RK_FORMAT_YCbCr_420_SP);
 
     dst.wstride = s->yuv_frame->linesize[0];
 
-    dst.hstride = 768;
+    dst.hstride = (int)s->height;
 
 
 
-    if (improcess(src, dst, (rga_buffer_t){0}, (im_rect){0, 0, s->width, s->height},
-                  (im_rect){0, 0, s->width, s->height}, (im_rect){0}, IM_SYNC) != IM_STATUS_SUCCESS) {
-        return -1;
+    {
+        IM_STATUS rga_status;
+
+        if (s->src_width != s->width || s->src_height != s->height) {
+            /* 缩小走 imresize + AVERAGE 插值：2:1 时等价于"两行平均"的 box 滤波，
+             * 正好把 sensor 60fps 隔行模式的长/短曝光两场合并掉（消横向条纹）。
+             * 直接 improcess 的默认插值不够平均，实测残留条纹明显。 */
+            rga_status = imresize_t(src, dst, 0, 0, IM_INTERP_AVERAGE, IM_SYNC);
+        } else {
+            rga_status = improcess(src, dst, (rga_buffer_t){0},
+                                   (im_rect){0, 0, s->width, s->height},
+                                   (im_rect){0, 0, s->width, s->height},
+                                   (im_rect){0}, IM_SYNC);
+        }
+
+        if (rga_status != IM_STATUS_SUCCESS) {
+            fprintf(stderr,
+                    "[Encoder] RGA copy/scale failed: %s (%d), src=%dx%d -> dst=%dx%d\n",
+                    imStrError_t(rga_status), (int)rga_status,
+                    s->src_width, s->src_height, s->width, s->height);
+            return -1;
+        }
     }
 
     
@@ -963,7 +1062,7 @@ int streamer_push_zerocopy_overlay(FFmpegStreamer *s, int dma_fd, const DetectSh
 
 
 
-            // --- ƽ���߼��޸�������ǵ�һ֡��ֱ�Ӹ�ֵ ---
+            // --- Apply exponential smoothing so the first frame is used directly as the baseline. ---
 
             if (smoothed_scores[id] < 0.0f) smoothed_scores[id] = raw_score;
 
@@ -1014,7 +1113,7 @@ int streamer_push_zerocopy_overlay(FFmpegStreamer *s, int dma_fd, const DetectSh
 
 
 
-            // A. �Ƿ����ǩ
+            // A. Draw the class label when available.
 
             if (label->rgba_data) {
 
@@ -1026,7 +1125,7 @@ int streamer_push_zerocopy_overlay(FFmpegStreamer *s, int dma_fd, const DetectSh
 
 
 
-            // B. �����Ŷ� (ʹ��ƽ�������ֵ)
+            // B. Draw the smoothed confidence value next to the label.
 
             if (score->rgba_data) {
 
@@ -1038,8 +1137,9 @@ int streamer_push_zerocopy_overlay(FFmpegStreamer *s, int dma_fd, const DetectSh
     }
 
 
-// ��ȷд����ʹ���������ڴ��� linesize[0] ȥ���� UV ����ʼ��ַ
-    s->yuv_frame->data[1] = s->yuv_frame->data[0] + (s->yuv_frame->linesize[0] * 768);
+    /* UV 紧跟在 Y 平面之后：偏移 = linesize[0] * height（按真实高度，不再用历史常量） */
+    s->yuv_frame->data[1] =
+        s->yuv_frame->data[0] + (int64_t)s->yuv_frame->linesize[0] * s->height;
     s->yuv_frame->linesize[1] = s->width;
 
     int fps = s->enc_ctx->framerate.num > 0 ? s->enc_ctx->framerate.num : 30;
@@ -1054,7 +1154,10 @@ int streamer_push_zerocopy_overlay(FFmpegStreamer *s, int dma_fd, const DetectSh
 
     ret = avcodec_send_frame(s->enc_ctx, s->yuv_frame);
 
-    if (ret < 0) return ret;
+    if (ret < 0) {
+        fprintf(stderr, "[Encoder] send_frame failed: %d\n", ret);
+        return ret;
+    }
 
     pkt = av_packet_alloc();
 
@@ -1068,6 +1171,8 @@ int streamer_push_zerocopy_overlay(FFmpegStreamer *s, int dma_fd, const DetectSh
 
         ret = av_write_frame(s->fmt_ctx, pkt);
         if (ret < 0) {
+            fprintf(stderr, "[Encoder] write_frame failed: %d (size=%d pts=%lld)\n",
+                    ret, pkt->size, (long long)pkt->pts);
             av_packet_unref(pkt);
             av_packet_free(&pkt);
             return ret;

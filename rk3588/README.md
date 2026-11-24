@@ -1,5 +1,84 @@
 # ELF2 Camera Flow
 
+## ELF2 双 Profile SDK
+
+当前构建分为两个明确边界：`buildroot-check` 只用于快速 AArch64 编译检查，不可直接部署；`jammy-deploy` 使用从 Desktop 镜像重建的 Jammy sysroot，并在板端验证完成前保持“未验证”。SDK 数据放在 `~/.local/opt/elf2-sdk`，仓库只保存脚本、测试和清单。
+
+完整恢复/构建顺序：
+
+```bash
+./scripts/setup_elf2_sdk.sh
+./scripts/build_elf2.sh --profile buildroot-check --jobs 8
+
+./scripts/capture_rockchip_tools.sh
+./scripts/setup_elf2_jammy_sdk.sh
+./scripts/install_elf2_jammy_deps.sh
+./scripts/build_ffmpeg6_rkmpp.sh
+./scripts/verify_elf2_sdk.sh --profile jammy-deploy --jobs 8
+```
+
+`buildroot-check` 缺少 Paho MQTT C、libmodbus 和 FFmpeg 6/RKMPP 编码证据时只告警；`jammy-deploy` 对 Paho、libmodbus、MPP、RKNN、RGA、FFmpeg ABI 60 及 `h264_rkmpp`/AAC 清单采取 fail-closed 策略。部署边界和恢复细节见 [[docs/elf2-sdk-recovery]]，硬件证据清单见 [[docs/elf2-board-validation]]。
+
+## WSL 交叉编译环境
+
+项目默认使用 `F:\ELF 2开发板资料包` 中的 ELF2 官方 Buildroot SDK。首次使用时在 WSL 执行：
+
+```bash
+cd ~/Linux/qiansai/rk3588
+./scripts/setup_elf2_sdk.sh
+make check-env
+make -j8
+file main
+readelf -d main | grep NEEDED
+```
+
+安装脚本会从以下压缩包读取 SDK：
+
+```text
+/mnt/f/ELF 2开发板资料包/05-常用工具/01-编译工具安装脚本/
+  aarch64-buildroot-linux-gnu_sdk-buildroot.tar.gz
+```
+
+并安装、重定位到：
+
+```text
+~/.local/opt/elf2-sdk/aarch64-buildroot-linux-gnu_sdk-buildroot
+```
+
+安装位置或压缩包位置不同时可显式覆盖：
+
+```bash
+./scripts/setup_elf2_sdk.sh \
+  --archive /path/to/aarch64-buildroot-linux-gnu_sdk-buildroot.tar.gz \
+  --install-dir /path/to/install-parent
+
+make ELF2_SDK_ROOT=/path/to/install-parent/aarch64-buildroot-linux-gnu_sdk-buildroot
+```
+
+构建配置与回归检查：
+
+```bash
+make print-config
+make test
+```
+
+### Buildroot SDK 与板端 Jammy 环境的边界
+
+F 盘 Buildroot SDK 可以完成 AArch64 编译，并提供 RKNN、RGA、MPP、DRM、FFmpeg、curl、SQLite 和 FreeType 的头文件/库。但当前工程原始部署环境使用另一套板端依赖，因此必须区分：
+
+- Buildroot SDK 内是 FFmpeg 4（`libavcodec.so.58`），当前未检测到 `h264_rkmpp` 编码器；它可以用于编译检查，不能直接替代原工程所用的 FFmpeg 6 / `h264_rkmpp` 运行环境。
+- Buildroot SDK 不包含 Paho MQTT C 和 libmodbus；缺少它们时，源码会编译已有的 `ENOSYS` 降级实现，`make check-env` 会明确告警。
+- 用于板端部署时，应从实际 ELF2/Jammy 系统补齐匹配的 sysroot（包括 FFmpeg 6、Paho MQTT C、libmodbus 及其开发头文件），然后覆盖 `SYSROOT`；如果库目录是 Debian/Ubuntu multiarch 布局，Makefile 会自动选择 `usr/lib/aarch64-linux-gnu`。
+
+示例：
+
+```bash
+make clean
+make SYSROOT=/path/to/elf2-jammy-sysroot
+```
+
+只有 `make check-env` 显示 `RKMPP_ENCODER=available`、`PAHO_MQTT=enabled`、`LIBMODBUS=enabled`，并且在目标板完成运行验证后，才能把该产物作为完整业务版本。
+
 ## 当前存档说明：OSD 标签、数字清晰度与推流流畅度优化
 
 本次存档已经完成视频画面 OSD 显示优化，重点解决检测标签、置信度数字和字体在 RTMP/VLC 推流中发虚、花边、彩色噪点和不清晰的问题。

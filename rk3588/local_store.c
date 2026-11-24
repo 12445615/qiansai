@@ -3,12 +3,15 @@
 #include "local_store.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -385,7 +388,342 @@ static int local_store_prune(LocalStore *store) {
     return 0;
 }
 
+
+/* ------------------------------------------------------------------------- */
+/* 存储根目录解析                                                             */
+/*                                                                            */
+/* 历史问题：默认根目录写死成 SD 卡自动挂载点（/media/elf/<UUID>/camera_flow）。  */
+/* 卡没插时该路径是一个「悬空软链」，mkdir 返回 ENOENT，local_store_open 直接   */
+/* 失败，调用方只看到一句 local_store_open failed，既没有路径也没有原因。        */
+/* 现在改为按候选列表逐个探测，并真的写一次探针文件。                            */
+/* ------------------------------------------------------------------------- */
+
+#define LOCAL_STORE_PROBE_FILE_NAME ".store_write_probe"
+#define LOCAL_STORE_MIN_FREE_BYTES (256LL * 1024 * 1024)
+#define LOCAL_STORE_MIN_FREE_BYTES_TMP (64LL * 1024 * 1024)
+#define LOCAL_STORE_MAX_MOUNT_CANDIDATES 8
+
+static char g_store_root[PATH_MAX];
+static int g_store_root_rc = ENODEV;
+static char g_store_root_reason[512];
+static pthread_once_t g_store_root_once = PTHREAD_ONCE_INIT;
+
+static void local_store_store_result(int rc, const char *path, const char *reason) {
+    g_store_root_rc = rc;
+
+    if (rc == 0 && path != NULL) {
+        snprintf(g_store_root, sizeof(g_store_root), "%s", path);
+    }
+    snprintf(g_store_root_reason, sizeof(g_store_root_reason), "%s", reason != NULL ? reason : "");
+}
+
+/*
+ * 判定候选目录是否真的可用：建目录 → statvfs（只读/剩余空间）→ 写探针文件并 fsync。
+ * 返回 0 表示可用，并把剩余字节数写进 free_out。
+ */
+static int local_store_probe_root(const char *path, int64_t min_free_bytes, int64_t *free_out) {
+    char probe_path[PATH_MAX];
+    struct statvfs vfs;
+    int64_t free_bytes;
+    int fd;
+    int rc;
+    ssize_t written;
+    int write_err = 0;
+
+    if (free_out != NULL) {
+        *free_out = 0;
+    }
+    if (path == NULL || path[0] != '/') {
+        return EINVAL;
+    }
+
+    rc = local_store_mkdirs(path);
+    if (rc != 0) {
+        return rc;
+    }
+
+    if (statvfs(path, &vfs) < 0) {
+        return errno;
+    }
+    if ((vfs.f_flag & ST_RDONLY) != 0) {
+        return EROFS;
+    }
+
+    free_bytes = (int64_t)vfs.f_bavail * (int64_t)vfs.f_frsize;
+    if (free_out != NULL) {
+        *free_out = free_bytes;
+    }
+    if (min_free_bytes > 0 && free_bytes < min_free_bytes) {
+        return ENOSPC;
+    }
+
+    rc = snprintf(probe_path, sizeof(probe_path), "%s/%s", path, LOCAL_STORE_PROBE_FILE_NAME);
+    if (rc < 0 || (size_t)rc >= sizeof(probe_path)) {
+        return ENAMETOOLONG;
+    }
+
+    fd = open(probe_path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
+    if (fd < 0) {
+        return errno;
+    }
+
+    written = write(fd, "ok\n", 3);
+    if (written != 3) {
+        write_err = written < 0 ? errno : EIO;
+    }
+    if (fsync(fd) < 0 && write_err == 0) {
+        write_err = errno;
+    }
+    if (close(fd) < 0 && write_err == 0) {
+        write_err = errno;
+    }
+    unlink(probe_path);
+
+    return write_err;
+}
+
+/* /proc/mounts 里的空格等字符是八进制转义的，这里还原成真实路径。 */
+static void local_store_unescape_mount_field(char *field) {
+    char *src = field;
+    char *dst = field;
+
+    if (field == NULL) {
+        return;
+    }
+
+    while (*src != '\0') {
+        if (*src == '\\' && src[1] >= '0' && src[1] <= '7' && src[2] >= '0' && src[2] <= '7' &&
+            src[3] >= '0' && src[3] <= '7') {
+            *dst++ = (char)(((src[1] - '0') << 6) | ((src[2] - '0') << 3) | (src[3] - '0'));
+            src += 4;
+            continue;
+        }
+        *dst++ = *src++;
+    }
+    *dst = '\0';
+}
+
+/* 拼 "<base>/<sub>"，显式做长度检查，避免 snprintf 截断告警。 */
+static int local_store_join_subdir(char *out, size_t out_size, const char *base, const char *sub) {
+    size_t base_len;
+    size_t sub_len;
+
+    if (out == NULL || out_size == 0 || base == NULL || sub == NULL) {
+        return EINVAL;
+    }
+
+    base_len = strlen(base);
+    sub_len = strlen(sub);
+    if (base_len == 0 || base_len + sub_len + 2 > out_size) {
+        return ENAMETOOLONG;
+    }
+
+    memcpy(out, base, base_len);
+    out[base_len] = '/';
+    memcpy(out + base_len + 1, sub, sub_len + 1);
+    return 0;
+}
+
+static int local_store_mount_is_removable(const char *mountpoint) {
+    if (mountpoint == NULL) {
+        return 0;
+    }
+    if (strncmp(mountpoint, "/media/", 7) == 0 && mountpoint[7] != '\0') {
+        return 1;
+    }
+    if (strncmp(mountpoint, "/run/media/", 11) == 0 && mountpoint[11] != '\0') {
+        return 1;
+    }
+    return 0;
+}
+
+/* 枚举 /media、/run/media 下的真实挂载点，跳过虚拟文件系统。 */
+static int local_store_collect_mount_candidates(char candidates[][PATH_MAX], int max_candidates) {
+    static const char *const kSkipFs[] = {
+        "tmpfs", "devtmpfs", "proc", "sysfs", "cgroup", "cgroup2", "debugfs", "tracefs",
+        "overlay", "squashfs", "ramfs", "configfs", "fusectl", "securityfs", "pstore",
+        "bpf", "mqueue", "hugetlbfs", "autofs", "nsfs", "binfmt_misc", "devpts",
+    };
+    char device[PATH_MAX];
+    char mountpoint[PATH_MAX];
+    char fstype[64];
+    char options[512];
+    FILE *fp;
+    int count = 0;
+    int skip;
+    size_t i;
+
+    if (candidates == NULL || max_candidates <= 0) {
+        return 0;
+    }
+
+    fp = fopen("/proc/mounts", "r");
+    if (fp == NULL) {
+        return 0;
+    }
+
+    while (count < max_candidates &&
+           fscanf(fp, "%4095s %4095s %63s %511s%*[^\n]", device, mountpoint, fstype, options) == 4) {
+        local_store_unescape_mount_field(mountpoint);
+        if (!local_store_mount_is_removable(mountpoint)) {
+            continue;
+        }
+
+        skip = 0;
+        for (i = 0; i < sizeof(kSkipFs) / sizeof(kSkipFs[0]); ++i) {
+            if (strcmp(fstype, kSkipFs[i]) == 0) {
+                skip = 1;
+                break;
+            }
+        }
+        if (skip) {
+            continue;
+        }
+
+        snprintf(candidates[count], PATH_MAX, "%s", mountpoint);
+        count++;
+    }
+
+    fclose(fp);
+    return count;
+}
+
+static void local_store_resolve_root_impl(void) {
+    /* 只列真实存在的板载数据分区：/data 在本镜像上并不存在，探测时会被 mkdir 造出来，别污染根分区。 */
+    static const char *const kLocalRoots[] = { "/userdata", "/var/lib" };
+    char candidates[LOCAL_STORE_MAX_MOUNT_CANDIDATES][PATH_MAX];
+    char path[PATH_MAX];
+    char best[PATH_MAX];
+    char reason[512];
+    const char *env_root;
+    int64_t free_bytes = 0;
+    int64_t best_free = 0;
+    int64_t chosen_free = 0;
+    int have_best = 0;
+    int count;
+    int rc;
+    int i;
+    size_t k;
+
+    memset(best, 0, sizeof(best));
+    snprintf(reason, sizeof(reason), "no writable candidate found");
+
+    /* 1) 显式指定优先：指定了却没生效要留下明确日志，然后继续自动降级，而不是让整机功能失效。 */
+    env_root = getenv("CAMERA_FLOW_STORE_DIR");
+    if (env_root != NULL && env_root[0] != '\0') {
+        rc = local_store_probe_root(env_root, LOCAL_STORE_MIN_FREE_BYTES, &free_bytes);
+        if (rc == 0) {
+            local_store_store_result(0, env_root, "CAMERA_FLOW_STORE_DIR");
+            chosen_free = free_bytes;
+            goto done;
+        }
+        fprintf(stderr,
+                "[LocalStore] CAMERA_FLOW_STORE_DIR=%s unusable: %s (%d), falling back to auto-detect\n",
+                env_root,
+                strerror(rc),
+                rc);
+        snprintf(reason, sizeof(reason), "CAMERA_FLOW_STORE_DIR=%s unusable: %s", env_root, strerror(rc));
+    }
+
+    /* 2) SD 卡 / U 盘：多张卡时按剩余空间择优。 */
+    count = local_store_collect_mount_candidates(candidates, LOCAL_STORE_MAX_MOUNT_CANDIDATES);
+    for (i = 0; i < count; ++i) {
+        rc = local_store_join_subdir(path, sizeof(path), candidates[i], "camera_flow");
+        if (rc != 0) {
+            continue;
+        }
+        rc = local_store_probe_root(path, LOCAL_STORE_MIN_FREE_BYTES, &free_bytes);
+        if (rc != 0) {
+            fprintf(stderr, "[LocalStore] removable candidate %s unusable: %s (%d)\n", path, strerror(rc), rc);
+            continue;
+        }
+        if (!have_best || free_bytes > best_free) {
+            snprintf(best, sizeof(best), "%s", path);
+            best_free = free_bytes;
+            have_best = 1;
+        }
+    }
+    if (have_best) {
+        local_store_store_result(0, best, "removable mount");
+        chosen_free = best_free;
+        goto done;
+    }
+    snprintf(reason, sizeof(reason), "no writable removable mount among %d candidate(s)", count);
+
+    /* 3) 板载数据分区：/userdata 往往只有几百 MB，所以也按剩余空间择优。 */
+    for (k = 0; k < sizeof(kLocalRoots) / sizeof(kLocalRoots[0]); ++k) {
+        rc = local_store_join_subdir(path, sizeof(path), kLocalRoots[k], "camera_flow");
+        if (rc != 0) {
+            continue;
+        }
+        rc = local_store_probe_root(path, LOCAL_STORE_MIN_FREE_BYTES, &free_bytes);
+        if (rc != 0) {
+            fprintf(stderr, "[LocalStore] onboard candidate %s unusable: %s (%d)\n", path, strerror(rc), rc);
+            continue;
+        }
+        if (!have_best || free_bytes > best_free) {
+            snprintf(best, sizeof(best), "%s", path);
+            best_free = free_bytes;
+            have_best = 1;
+        }
+    }
+    if (have_best) {
+        local_store_store_result(0, best, "onboard data partition");
+        chosen_free = best_free;
+        goto done;
+    }
+
+    /* 4) 最后兜底：/tmp 一定能用，但重启即丢，必须显式告警。 */
+    rc = local_store_probe_root("/tmp/camera_flow", LOCAL_STORE_MIN_FREE_BYTES_TMP, &free_bytes);
+    if (rc == 0) {
+        fprintf(stderr,
+                "[LocalStore] WARNING: falling back to volatile /tmp/camera_flow, cached data is lost on reboot\n");
+        local_store_store_result(0, "/tmp/camera_flow", "volatile /tmp fallback");
+        chosen_free = free_bytes;
+        goto done;
+    }
+
+    local_store_store_result(rc, NULL, reason);
+    fprintf(stderr, "[LocalStore] no usable store root: %s (%s)\n", reason, strerror(rc));
+    return;
+
+done:
+    fprintf(stderr,
+            "[LocalStore] root resolved: %s (source: %s, free: %lld MB)\n",
+            g_store_root,
+            g_store_root_reason,
+            (long long)(chosen_free / (1024 * 1024)));
+}
+
+const char *local_store_resolve_root_cached(void) {
+    pthread_once(&g_store_root_once, local_store_resolve_root_impl);
+    return g_store_root_rc == 0 ? g_store_root : NULL;
+}
+
+int local_store_resolve_root(char *out, size_t out_size) {
+    const char *root;
+    size_t len;
+
+    if (out == NULL || out_size == 0) {
+        return EINVAL;
+    }
+
+    root = local_store_resolve_root_cached();
+    if (root == NULL) {
+        return g_store_root_rc != 0 ? g_store_root_rc : ENODEV;
+    }
+
+    len = strlen(root);
+    if (len + 1 > out_size) {
+        return ENAMETOOLONG;
+    }
+
+    memcpy(out, root, len + 1);
+    return 0;
+}
+
 int local_store_open(LocalStore *store, const char *root_dir) {
+    char resolved_root[PATH_MAX];
     const char *effective_root = root_dir;
     char lock_path[PATH_MAX];
     int lock_fd = -1;
@@ -398,15 +736,35 @@ int local_store_open(LocalStore *store, const char *root_dir) {
     memset(store, 0, sizeof(*store));
     store->max_rows = LOCAL_STORE_MAX_ROWS;
 
-    if (effective_root == NULL || effective_root[0] == '\0') {
-        effective_root = getenv("CAMERA_FLOW_STORE_DIR");
+    /* 显式传入的根目录同样先探测：不可写作废并回退自动解析，而不是让整机失去缓存能力。 */
+    if (effective_root != NULL && effective_root[0] != '\0') {
+        rc = local_store_probe_root(effective_root, LOCAL_STORE_MIN_FREE_BYTES_TMP, NULL);
+        if (rc != 0) {
+            fprintf(stderr,
+                    "[LocalStore] requested root %s unusable: %s (%d), falling back to auto-detect\n",
+                    effective_root,
+                    strerror(rc),
+                    rc);
+            effective_root = NULL;
+        }
     }
+
     if (effective_root == NULL || effective_root[0] == '\0') {
-        effective_root = LOCAL_STORE_DEFAULT_ROOT;
+        rc = local_store_resolve_root(resolved_root, sizeof(resolved_root));
+        if (rc != 0) {
+            fprintf(stderr, "[LocalStore] no usable store root: %s (%d)\n", strerror(rc), rc);
+            return rc;
+        }
+        effective_root = resolved_root;
     }
 
     rc = local_store_mkdirs(effective_root);
     if (rc != 0) {
+        fprintf(stderr,
+                "[LocalStore] cannot create store root %s: %s (%d)\n",
+                effective_root,
+                strerror(rc),
+                rc);
         return rc;
     }
 
@@ -418,12 +776,17 @@ int local_store_open(LocalStore *store, const char *root_dir) {
     lock_fd = local_store_open_init_lock(effective_root, lock_path, sizeof(lock_path));
     if (lock_fd < 0) {
         rc = errno != 0 ? errno : EIO;
+        fprintf(stderr, "[LocalStore] cannot open init lock under %s: %s (%d)\n",
+                effective_root,
+                strerror(rc),
+                rc);
         return rc;
     }
 
     rc = sqlite3_open(store->db_path, &store->db);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "[LocalStore] sqlite open failed: %s\n",
+        fprintf(stderr, "[LocalStore] sqlite open failed for %s: %s\n",
+                store->db_path,
                 store->db != NULL ? sqlite3_errmsg(store->db) : "unknown");
         local_store_close(store);
         rc = EIO;
@@ -435,6 +798,7 @@ int local_store_open(LocalStore *store, const char *root_dir) {
     // WAL + NORMAL 在 SD 卡场景下比默认模式更适合频繁写入和异常恢复。
     rc = local_store_exec(store, "PRAGMA journal_mode=WAL;");
     if (rc != 0) {
+        fprintf(stderr, "[LocalStore] WAL pragma failed on %s\n", store->db_path);
         local_store_close(store);
         goto unlock_and_exit;
     }
@@ -447,18 +811,24 @@ int local_store_open(LocalStore *store, const char *root_dir) {
 
     rc = local_store_init_schema(store);
     if (rc != 0) {
+        fprintf(stderr, "[LocalStore] schema init failed on %s\n", store->db_path);
         local_store_close(store);
         goto unlock_and_exit;
     }
 
     rc = local_store_ensure_video_segments_columns(store);
     if (rc != 0) {
+        fprintf(stderr, "[LocalStore] video_segments migration failed on %s\n", store->db_path);
         local_store_close(store);
         goto unlock_and_exit;
     }
 
 unlock_and_exit:
     local_store_close_init_lock(lock_fd);
+    if (rc == 0) {
+        printf("[LocalStore] ready: %s\n", store->db_path);
+        fflush(stdout);
+    }
     return rc;
 }
 

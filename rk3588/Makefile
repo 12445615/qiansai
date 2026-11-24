@@ -1,110 +1,178 @@
-# =================================================
-# 1. 交叉编译器配置
-# =================================================
-CROSS_COMPILE = /home/why/rk3588/ELF2-linux-source/prebuilts/gcc/linux-x86/aarch64/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-
+ROOT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+
+include $(ROOT_DIR)/mk/elf2_profiles.mk
 CC = $(CROSS_COMPILE)gcc
 CXX = $(CROSS_COMPILE)g++
 
-# =================================================
-# 2. 路径定义
-# =================================================
-ROOT_DIR = $(CURDIR)
+TARGET := main
 
-# 基础依赖路径
-FFMPEG_INC = /home/why/rk3588/include
-RKNN_INC   = /home/why/rk3588/ELF2-linux-source/external/rknpu2/runtime/Linux/librknn_api/include
-RGA_INC    = /home/why/rk3588/ELF2-linux-source/external/linux-rga/include
-IM2D_INC   = /home/why/rk3588/ELF2-linux-source/external/linux-rga/im2d_api
+C_SRCS := main.c camera.c ipc.c encoder.c aliyun_mqtt.c zone_detector.c \
+          sensor_modbus.c local_store.c video_store.c video_uploader.c \
+          osd_cache.c audio_alert.c safety_interlock_client.c
+CXX_SRCS := postprocess.cc rknn_worker.cc
+OBJS := $(C_SRCS:.c=.o) $(CXX_SRCS:.cc=.o)
+DEPS := $(OBJS:.o=.d)
 
-# OpenCV 路径
-OPENCV_DIR = "/home/why/rk3588/rkproject/ai训练/rknn_model_zoo/3rdparty/opencv/opencv-linux-aarch64"
-OPENCV_INC = $(OPENCV_DIR)/include
-OPENCV_LIB = $(OPENCV_DIR)/lib
+SYSROOT_INC := $(SYSROOT)/usr/include
+USR_LOCAL_LIB_DIR := $(SYSROOT)/usr/local/lib
+MULTIARCH_LIB_DIR := $(SYSROOT)/usr/lib/aarch64-linux-gnu
+ROOT_MULTIARCH_LIB_DIR := $(SYSROOT)/lib/aarch64-linux-gnu
+USR_LIB_DIR := $(SYSROOT)/usr/lib
+LIB_SEARCH_DIRS := $(strip $(if $(wildcard $(USR_LOCAL_LIB_DIR)),$(USR_LOCAL_LIB_DIR)) $(if $(wildcard $(MULTIARCH_LIB_DIR)),$(MULTIARCH_LIB_DIR)) $(if $(wildcard $(ROOT_MULTIARCH_LIB_DIR)),$(ROOT_MULTIARCH_LIB_DIR)) $(if $(wildcard $(USR_LIB_DIR)),$(USR_LIB_DIR)))
+SYSROOT_LIB ?= $(firstword $(LIB_SEARCH_DIRS))
+SYSROOT_ARCH_INC ?= $(if $(wildcard $(SYSROOT_INC)/aarch64-linux-gnu),$(SYSROOT_INC)/aarch64-linux-gnu,$(SYSROOT_INC))
 
-# 系统库路径
-SYSROOT_LIB = $(ROOT_DIR)/third_party/elf2_sysroot/usr/lib/aarch64-linux-gnu
-SYSROOT_INC = $(ROOT_DIR)/third_party/elf2_sysroot/usr/include
-SYSROOT_ARCH_INC = $(ROOT_DIR)/third_party/elf2_sysroot/usr/include/aarch64-linux-gnu
+find_lib = $(firstword $(foreach libdir,$(LIB_SEARCH_DIRS),$(wildcard $(libdir)/$(1))))
+AVCODEC_LIB := $(call find_lib,libavcodec.so)
+RKNN_LIB := $(call find_lib,librknnrt.so)
+RGA_LIB := $(call find_lib,librga.so)
+PAHO_LIB := $(call find_lib,libpaho-mqtt3c.so)
+MODBUS_LIB := $(call find_lib,libmodbus.so)
+MPP_LIB := $(call find_lib,librockchip_mpp.so)
+FFMPEG_ABI := $(shell for h in "$(SYSROOT_INC)/libavcodec/version_major.h" "$(SYSROOT)/usr/local/include/libavcodec/version_major.h"; do if test -r "$$h"; then sed -n 's/^#define LIBAVCODEC_VERSION_MAJOR[[:space:]]*//p' "$$h"; break; fi; done)
+FFMPEG_MANIFEST := $(SYSROOT)/manifests/ffmpeg-rockchip.txt
+FFMPEG_COMPONENTS := $(SYSROOT)/manifests/ffmpeg-rockchip-components.txt
+FFMPEG_SONAME_OK := $(shell if test -n "$(AVCODEC_LIB)" && readelf -d "$(AVCODEC_LIB)" 2>/dev/null | grep -Eq 'SONAME[^]]*libavcodec.so.60'; then echo yes; else echo no; fi)
 
-# 硬件加速库路径
-RKNN_LIB_DIR = /home/why/rk3588/ELF2-linux-source/external/rknpu2/runtime/Linux/librknn_api/aarch64
-RGA_LIB_DIR  = "/home/why/rk3588/rkproject/ai训练/rknn_model_zoo/3rdparty/librga/Linux/aarch64"
-DRM_LIB_DIR  = /home/why/rk3588/ELF2-linux-source/external/linux-rga/samples/utils/3rdparty/libdrm/lib/arm64
-CUSTOM_LIB   = /home/why/rk3588/lib
+PAHO_MQTT := $(if $(and $(wildcard $(SYSROOT_INC)/MQTTClient.h),$(PAHO_LIB)),enabled,disabled)
+LIBMODBUS := $(if $(and $(wildcard $(SYSROOT_INC)/modbus/modbus.h),$(MODBUS_LIB)),enabled,disabled)
+RKMPP_ENCODER := $(shell \
+    if test -n "$(AVCODEC_LIB)" && test "$(FFMPEG_ABI)" = 60 && test "$(FFMPEG_SONAME_OK)" = yes \
+       && grep -Fxq 'COMMIT=99d938d6ea32c31457bb68a5a2177c94d13a4854' "$(FFMPEG_MANIFEST)" \
+       && grep -Fxq 'CONFIG_H264_RKMPP_ENCODER=1' "$(FFMPEG_COMPONENTS)" \
+       && grep -Fxq 'CONFIG_AAC_ENCODER=1' "$(FFMPEG_COMPONENTS)"; then echo available; \
+    elif test -n "$(AVCODEC_LIB)"; then echo unavailable; else echo unknown; fi)
 
-# =================================================
-# 3. 编译选项 (已新增 FreeType 头文件路径)
-# =================================================
-INC_FLAGS = -I$(FFMPEG_INC) \
-            -I$(RKNN_INC) \
-            -I$(RGA_INC) \
-            -I$(IM2D_INC) \
-            -I$(OPENCV_INC) \
-            -I$(SYSROOT_INC) \
+CPPFLAGS := -I$(SYSROOT_INC) \
+            -I$(SYSROOT)/usr/local/include \
+            -I$(SYSROOT)/usr/local/include/rockchip \
+            -I$(SYSROOT_INC)/rknn \
+            -I$(SYSROOT_INC)/rga \
             -I$(SYSROOT_INC)/freetype2 \
+            -I$(SYSROOT_INC)/libdrm \
             -I$(SYSROOT_ARCH_INC) \
             -I.
+CFLAGS := -Wall -Wextra -O2 -g -MMD -MP -DDISABLE_LIBJPEG
+CXXFLAGS := $(CFLAGS) -std=c++11
 
-CFLAGS   = -Wall -O2 -g $(INC_FLAGS) -DDISABLE_LIBJPEG -Wl,--allow-shlib-undefined
-CXXFLAGS = $(CFLAGS) -std=c++11
-
-# =================================================
-# 4. 链接选项 (已新增 -lfreetype)
-# =================================================
-LDFLAGS = -L$(CUSTOM_LIB) \
-          -L$(RKNN_LIB_DIR) \
-          -L$(RGA_LIB_DIR) \
-          -L$(DRM_LIB_DIR) \
-          -L$(OPENCV_LIB) \
-          -L$(SYSROOT_LIB) \
-          -Wl,-rpath=/usr/lib/aarch64-linux-gnu \
-          -l:libavformat.so.60 \
-          -l:libavcodec.so.60 \
-          -l:libswscale.so.7 \
-          -l:libswresample.so.4 \
-          -l:libavutil.so.58 \
-          -lpaho-mqtt3c \
-          -lmodbus \
-          -lcurl \
-          -lsqlite3 \
-          -ldrm \
-          -lrga \
-          -lrknnrt \
-          -lfreetype \
-          -lopencv_imgproc -lopencv_core \
+LDFLAGS := --sysroot=$(SYSROOT) \
+           $(foreach libdir,$(LIB_SEARCH_DIRS),-L$(libdir) -Wl,-rpath-link,$(libdir))
+ifeq ($(PROFILE_STRICT),1)
+LDFLAGS += -Wl,--no-allow-shlib-undefined
+else
+LDFLAGS += -Wl,--allow-shlib-undefined
+endif
+LDLIBS := -lavformat -lavcodec -lswresample -lavutil \
+          -lcurl -lsqlite3 -ldrm -lrga -lrknnrt -lfreetype \
           -lm -lpthread -ldl
 
-# =================================================
-# 5. 源文件配置 (已新增 osd_cache.c 和 audio_alert.c)
-# =================================================
-TARGET = main
+# The official ELF2 Buildroot SDK does not ship Paho MQTT C or libmodbus.
+# The source already contains compile-time fallbacks when their headers are
+# absent, so link them only when an augmented sysroot provides both libraries.
+ifeq ($(PAHO_MQTT),enabled)
+LDLIBS += -lpaho-mqtt3c
+endif
 
-# 纯 C 源文件
-C_SRCS = main.c camera.c ipc.c encoder.c aliyun_mqtt.c zone_detector.c \
-         sensor_modbus.c local_store.c video_store.c \ video_uploader.c osd_cache.c audio_alert.c \
-         safety_interlock_client.c
+ifeq ($(LIBMODBUS),enabled)
+LDLIBS += -lmodbus
+endif
 
-# C++ 源文件
-CXX_SRCS = postprocess.cc rknn_worker.cc
+ifeq ($(MPP_LIB),)
+else
+LDLIBS += -lrockchip_mpp
+endif
 
-# 生成对应的 .o 文件列表
-OBJS = $(C_SRCS:.c=.o) $(CXX_SRCS:.cc=.o)
+.DEFAULT_GOAL := all
 
-# =================================================
-# 6. 编译规则
-# =================================================
-all: $(TARGET)
+.PHONY: all clean check-env print-config test
+
+all: check-env $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+# 独立存储自检程序：不碰相机/NPU/编码，可在板上单独验证本地存储是否可用。
+.PHONY: store-debug
+store-debug: store_debug.o local_store.o
+	$(CC) $(LDFLAGS) -o store_debug $^ -lsqlite3 -lpthread -lm
+	@echo "built: store_debug"
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 %.o: %.cc
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+check-env:
+	@test -x "$(CC)" || { echo "error: ELF2 cross compiler not found: $(CC)" >&2; echo "hint: run scripts/setup_elf2_sdk.sh or override ELF2_SDK_ROOT" >&2; exit 1; }
+	@test -d "$(SYSROOT)" || { echo "error: ELF2 sysroot not found: $(SYSROOT)" >&2; exit 1; }
+	@test -f "$(SYSROOT_INC)/rknn/rknn_api.h" || { echo "error: RKNN header missing from ELF2 sysroot" >&2; exit 1; }
+	@test -n "$(RKNN_LIB)" -a -f "$(RKNN_LIB)" || { echo "error: RKNN runtime library missing from ELF2 sysroot" >&2; exit 1; }
+	@test -f "$(SYSROOT_INC)/rga/im2d.h" || { echo "error: RGA header missing from ELF2 sysroot" >&2; exit 1; }
+	@test -n "$(RGA_LIB)" -a -f "$(RGA_LIB)" || { echo "error: RGA runtime library missing from ELF2 sysroot" >&2; exit 1; }
+	@if test "$(PROFILE_STRICT)" = 1; then \
+		test "$(PAHO_MQTT)" = enabled || { echo "error: Paho MQTT C is required for jammy-deploy" >&2; exit 1; }; \
+		test "$(LIBMODBUS)" = enabled || { echo "error: libmodbus is required for jammy-deploy" >&2; exit 1; }; \
+		test -n "$(MPP_LIB)" || { echo "error: RKMPP runtime library is required for jammy-deploy" >&2; exit 1; }; \
+		test -n "$(RKNN_LIB)" || { echo "error: RKNN runtime library is required for jammy-deploy" >&2; exit 1; }; \
+		test -n "$(RGA_LIB)" || { echo "error: RGA runtime library is required for jammy-deploy" >&2; exit 1; }; \
+		test "$(FFMPEG_ABI)" = 60 || { echo "error: FFmpeg ABI 60 is required for jammy-deploy" >&2; exit 1; }; \
+		test "$(RKMPP_ENCODER)" = available || { echo "error: h264_rkmpp_encoder evidence is missing for jammy-deploy" >&2; exit 1; }; \
+	else \
+		test "$(PAHO_MQTT)" = enabled || echo "warning: Paho MQTT C is unavailable; MQTT code will use its ENOSYS fallback" >&2; \
+		test "$(LIBMODBUS)" = enabled || echo "warning: libmodbus is unavailable; Modbus code will use its ENOSYS fallback" >&2; \
+		test "$(RKMPP_ENCODER)" = available || echo "warning: this sysroot does not expose the h264_rkmpp FFmpeg encoder; use the board/Jammy sysroot for deployment" >&2; \
+	fi
+	@echo "ELF2 SDK environment OK"
+
+print-config:
+	@echo "PROFILE=$(PROFILE)"
+	@echo "PROFILE_STRICT=$(PROFILE_STRICT)"
+	@echo "ELF2_SDK_ROOT=$(ELF2_SDK_ROOT)"
+	@echo "SYSROOT=$(SYSROOT)"
+	@echo "SYSROOT_LIB=$(SYSROOT_LIB)"
+	@echo "LIB_SEARCH_DIRS=$(LIB_SEARCH_DIRS)"
+	@echo "RKNN_LIB=$(RKNN_LIB)"
+	@echo "RGA_LIB=$(RGA_LIB)"
+	@echo "MPP_LIB=$(MPP_LIB)"
+	@echo "FFMPEG_ABI=$(FFMPEG_ABI)"
+	@echo "CC=$(CC)"
+	@echo "CXX=$(CXX)"
+	@echo "PAHO_MQTT=$(PAHO_MQTT)"
+	@echo "LIBMODBUS=$(LIBMODBUS)"
+	@echo "RKMPP_ENCODER=$(RKMPP_ENCODER)"
+	@echo "CPPFLAGS=$(CPPFLAGS)"
+	@echo "LDLIBS=$(LDLIBS)"
+
+test:
+	bash tests/test_profile_config.sh
+	bash tests/test_build_wrapper.sh
+	bash tests/test_capture_rockchip_tools.sh
+	bash tests/test_jammy_setup.sh
+	bash tests/test_jammy_deps.sh
+	bash tests/test_ffmpeg6_rkmpp_config.sh
+	bash tests/test_jammy_strict_env.sh
+	bash tests/test_elf_dependency_check.sh
+	bash tests/test_build_config.sh
+	bash tests/test_sdk_setup.sh
+	bash tests/test_optional_deps_build.sh
+
+# 视频分片存储自检：local_store + video_store 串联，不依赖相机/编码器。
+.PHONY: store-video-test
+store-video-test: store_video_test.o local_store.o video_store.o
+	$(CC) $(LDFLAGS) -o store_video_test $^ -lsqlite3 -lpthread -lm
+	@echo "built: store_video_test"
+
+# 编码器/推流初始化自检：复现 streamer_init 崩溃，不依赖相机。
+.PHONY: encoder-test
+encoder-test: encoder_test.o encoder.o osd_cache.o
+	$(CC) $(LDFLAGS) -o encoder_test $^ -lavformat -lavcodec -lswresample -lavutil \
+	  -lrga -lrockchip_mpp -ldrm -lfreetype -lm -lpthread -ldl
+	@echo "built: encoder_test"
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(DEPS) $(TARGET) store_debug store_debug.o store_video_test store_video_test.o encoder_test encoder_test.o
 
-.PHONY: all clean
+include $(ROOT_DIR)/mk/recovery.mk
+
+-include $(DEPS)
