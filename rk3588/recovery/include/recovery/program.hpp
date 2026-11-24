@@ -61,7 +61,7 @@ struct FaultReport {
     FaultSubject subject;
     EpochSnapshot observed_epochs;
     FaultEvidence evidence;
-    auto operator<=>(const FaultReport&) const = default;
+    // Deliberately no == / <=>: equal content carries no identity (§14, I37).
 };
 struct FaultIdentity {
     BootId boot_id;

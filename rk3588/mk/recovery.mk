@@ -60,6 +60,13 @@ recovery-task4-boundary:
 	else \
 		echo "PASS: RecoveryInstanceRuntime keeps owner ACKs only as required_owners + accepted_owner_acks"; \
 	fi
+	@if { sed -n '/^struct FaultReport {/,/^};/p;/^struct FaultFact {/,/^};/p' $(RECOVERY_INCLUDE_DIR)/recovery/program.hpp; \
+		sed -n '/struct RecoveryInstanceRuntime/,/^};/p' $(RECOVERY_INCLUDE_DIR)/recovery/runtime.hpp; } \
+		| grep -Ein 'delivery'; then \
+		echo "FAIL: a delivery-layer field reached FaultReport/FaultFact/RecoveryInstanceRuntime (G11)" >&2; exit 1; \
+	else \
+		echo "PASS: FaultReport, FaultFact and RecoveryInstanceRuntime carry no delivery id (G11)"; \
+	fi
 	@if grep -REn 'FaultReportToken|ReporterId|last_report_seq|fault_content_digest' \
 		$(RECOVERY_INCLUDE_DIR)/recovery $(RECOVERY_SOURCE_DIR); then \
 		echo "FAIL: deleted replay/dedup kernel state remains in recovery sources" >&2; exit 1; \

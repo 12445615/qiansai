@@ -96,7 +96,7 @@ RECOVERY_TEST(R166_allocation_failure_is_explicit_and_leaves_runtime_unchanged) 
     for (const auto stage : kPhaseAStages) {
         ThrowAt<std::bad_alloc> failure{stage};
         recovery::RecoveryCoordinator c{11, nullptr, &failure};
-        RECOVERY_CHECK(c.report_fault(fault()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, fault()));
         const auto before = view(c);
         const auto result = c.begin_freeze(ledger(), bindings());
         RECOVERY_CHECK(error_of(result) == BeginFreezeErrorCode::ALLOCATION_FAILED);
@@ -110,7 +110,7 @@ RECOVERY_TEST(R166_non_allocation_exception_fails_closed_without_publication) {
     for (const auto stage : kPhaseAStages) {
         ThrowAt<std::runtime_error> failure{stage};
         recovery::RecoveryCoordinator c{11, nullptr, &failure};
-        RECOVERY_CHECK(c.report_fault(fault()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, fault()));
         const auto before = view(c);
         const auto result = c.begin_freeze(ledger(), bindings());
         RECOVERY_CHECK(error_of(result) == BeginFreezeErrorCode::INTERNAL_FAILURE);
@@ -124,7 +124,7 @@ RECOVERY_TEST(R166_non_allocation_exception_fails_closed_without_publication) {
 // ④ freeze_seq == UINT64_MAX must not wrap to a reused sequence.
 RECOVERY_TEST(R166_exhausted_freeze_sequence_fails_closed_without_wrapping) {
     recovery::RecoveryCoordinator c{11};
-    RECOVERY_CHECK(c.report_fault(fault()));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, fault()));
     Access::set_freeze_seq(c, std::numeric_limits<recovery::FreezeSeq>::max());
     const auto before = view(c);
     const auto result = c.begin_freeze(ledger(), bindings());
@@ -146,7 +146,7 @@ RECOVERY_TEST(R166_wrong_phase_is_explicit_and_writes_nothing) {
     }
     {
         recovery::RecoveryCoordinator frozen{11};
-        RECOVERY_CHECK(frozen.report_fault(fault()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(frozen, fault()));
         RECOVERY_CHECK(recovery::test::succeeded(frozen.begin_freeze({})));
         RECOVERY_CHECK(frozen.commit_freeze());
         const auto sequence = Access::freeze_seq(frozen);
@@ -160,7 +160,7 @@ RECOVERY_TEST(R166_wrong_phase_is_explicit_and_writes_nothing) {
 // ⑥ one commit; the returned request is the only copy and is what gets re-sent.
 RECOVERY_TEST(R166_success_returns_the_committed_request_and_resend_reuses_it) {
     recovery::RecoveryCoordinator c{11};
-    RECOVERY_CHECK(c.report_fault(fault()));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, fault()));
     const auto sequence_before = Access::freeze_seq(c);
     const auto result = c.begin_freeze(ledger(), bindings());
     RECOVERY_CHECK(recovery::test::succeeded(result));
@@ -206,7 +206,7 @@ RECOVERY_TEST(R166_lock_failure_exits_through_watchdog_not_terminate) {
     expect_watchdog_exit([] {
         ThrowAt<std::system_error> failure{RuntimeFailureStage::BEGIN_FREEZE_LOCK};
         recovery::RecoveryCoordinator c{11, nullptr, &failure};
-        if (!c.report_fault(fault())) ::_exit(2);
+        if (!recovery::RecoveryTestAccess::report_fault(c, fault())) ::_exit(2);
         (void)c.begin_freeze(ledger(), bindings());
     });
 }
@@ -216,7 +216,7 @@ RECOVERY_TEST(R137_commit_freeze_lock_failure_exits_through_watchdog_not_termina
     expect_watchdog_exit([] {
         ThrowAt<std::system_error> failure{RuntimeFailureStage::FREEZE_LOCK};
         recovery::RecoveryCoordinator c{11, nullptr, &failure};
-        if (!c.report_fault(fault())) ::_exit(2);
+        if (!recovery::RecoveryTestAccess::report_fault(c, fault())) ::_exit(2);
         if (!recovery::test::succeeded(c.begin_freeze({}))) ::_exit(3);
         (void)c.commit_freeze();
     });

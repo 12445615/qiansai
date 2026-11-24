@@ -82,7 +82,7 @@ RECOVERY_TEST(G1_frame_codec_round_trips_one_frame_per_packet) {
     RECOVERY_CHECK(!bytes.empty());
     const auto decoded = recovery::decode_fault_frame(bytes);
     RECOVERY_CHECK(decoded.has_value());
-    RECOVERY_CHECK(*decoded == sent);
+    RECOVERY_CHECK(recovery::encode_fault_frame(*decoded) == bytes);
 }
 
 RECOVERY_TEST(G1_frame_codec_rejects_non_canonical_bytes) {
@@ -126,7 +126,8 @@ RECOVERY_TEST(G1_reader_authorizes_inside_receive_and_rejection_is_terminal) {
     const auto first = io.read_authorized(session);
     const auto* authorized = std::get_if<recovery::AuthorizedFaultFrame>(&first);
     RECOVERY_CHECK(authorized != nullptr);
-    RECOVERY_CHECK(authorized->frame() == allowed);
+    RECOVERY_CHECK(recovery::encode_fault_frame(authorized->frame())
+                   == recovery::encode_fault_frame(allowed));
 
     const auto second = io.read_authorized(session);
     RECOVERY_CHECK(terminal_of(second) == SessionTerminalCode::REJECTED_UNTRUSTED);

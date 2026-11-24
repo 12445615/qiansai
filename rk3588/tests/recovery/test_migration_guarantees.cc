@@ -89,7 +89,7 @@ Compiling drive(Upto upto, recovery::RuntimeFailureProvider* provider) {
     Compiling in{std::make_unique<recovery::RecoveryCoordinator>(11, nullptr, provider),
                  packet_policy(), empty_registry()};
     if (upto == Upto::IDLE) return in;
-    RECOVERY_CHECK(in.coordinator->report_fault(fault()));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(*in.coordinator, fault()));
     RECOVERY_CHECK(recovery::test::succeeded(in.coordinator->begin_freeze({},
         {{1, recovery::ExecutorBindingStatus::RESOLVED,
           recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}})));
@@ -140,7 +140,7 @@ RECOVERY_TEST(R167_lock_failure_in_every_migration_exits_through_watchdog) {
     };
     const Case cases[] = {
         {RuntimeFailureStage::REPORT_LOCK, Upto::IDLE,
-         [](Compiling& in) { (void)in.coordinator->report_fault(fault()); }},
+         [](Compiling& in) { (void)recovery::RecoveryTestAccess::report_fault(*in.coordinator, fault()); }},
         {RuntimeFailureStage::OWNER_ACK_LOCK, Upto::FREEZING,
          [](Compiling& in) {
              const auto ctx = Access::issue_test_context({99, 100});
@@ -221,7 +221,7 @@ RECOVERY_TEST(R167_every_return_path_releases_the_mutex) {
         RECOVERY_CHECK(!recovery::test::succeeded(c.begin_freeze({}))); released(c);
         RECOVERY_CHECK(!c.commit_freeze()); released(c);
         RECOVERY_CHECK(!c.begin_compile()); released(c);       // wrong state → FAIL_CLOSED
-        RECOVERY_CHECK(!c.report_fault(fault())); released(c);  // already FAIL_CLOSED
+        RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(c, fault())); released(c);  // already FAIL_CLOSED
     }
     {
         auto in = drive(Upto::FREEZING, nullptr);

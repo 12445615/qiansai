@@ -51,6 +51,13 @@ struct ProcessIdentity {
     auto operator<=>(const ProcessIdentity&) const = default;
 };
 
+// Authorization-side delivery id (§14). Never comparable or convertible with
+// the ingress FaultDeliveryId (G11).
+struct AuthorizationDeliveryId final {
+    Digest value{};
+    auto operator<=>(const AuthorizationDeliveryId&) const = default;
+};
+
 struct ProcessExitBindingId {
     RecoveryInstanceId recovery_id;
     FreezeSeq freeze_seq;

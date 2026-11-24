@@ -38,7 +38,7 @@ RECOVERY_TEST(process_exit_binding_reads_generation_exactly_twice_and_publishes_
     int pipefd[2]; RECOVERY_CHECK(::pipe(pipefd) == 0);
     FakeKernel kernel{{123, 123}, pipefd[0]};
     recovery::RecoveryCoordinator coordinator{9, &kernel};
-    RECOVERY_CHECK(coordinator.report_fault(process_fault({44, 123})));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, process_fault({44, 123})));
     RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({}, owners())));
     RECOVERY_CHECK(coordinator.commit_freeze());
     RECOVERY_CHECK_EQ(kernel.read_index, 2U);
@@ -55,7 +55,7 @@ RECOVERY_TEST(process_exit_binding_five_failures_fail_closed_without_publication
         int pipefd[2]; RECOVERY_CHECK(::pipe(pipefd) == 0);
         FakeKernel kernel{cases[index], index == 2 ? -1 : pipefd[0]};
         recovery::RecoveryCoordinator coordinator{9, &kernel};
-        RECOVERY_CHECK(coordinator.report_fault(process_fault({44, 123})));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, process_fault({44, 123})));
         const auto batch = coordinator.active().fault_batch;
         const auto counter = recovery::RecoveryTestAccess::fault_seq_counter(coordinator);
         RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({}, owners())));
@@ -83,8 +83,8 @@ RECOVERY_TEST(R9_R163_raw_fd_value_does_not_change_frozen_canonical_bytes) {
     FakeKernel second_kernel{{123, 123}, second_pipe[0]};
     recovery::RecoveryCoordinator first{9, &first_kernel};
     recovery::RecoveryCoordinator second{9, &second_kernel};
-    RECOVERY_CHECK(first.report_fault(process_fault({44, 123})));
-    RECOVERY_CHECK(second.report_fault(process_fault({44, 123})));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(first, process_fault({44, 123})));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(second, process_fault({44, 123})));
     RECOVERY_CHECK(recovery::test::succeeded(first.begin_freeze({}, owners())));
     RECOVERY_CHECK(recovery::test::succeeded(second.begin_freeze({}, owners())));
     RECOVERY_CHECK(first.commit_freeze());
@@ -102,7 +102,7 @@ RECOVERY_TEST(R137_failure_after_pidfd_open_closes_local_fd_without_publication)
     FakeKernel kernel{{123, 123}, opened};
     ThrowAfterBindings failure;
     recovery::RecoveryCoordinator coordinator{9, &kernel, &failure};
-    RECOVERY_CHECK(coordinator.report_fault(process_fault({44, 123})));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, process_fault({44, 123})));
     const auto batch = coordinator.active().fault_batch;
     const auto counter = recovery::RecoveryTestAccess::fault_seq_counter(coordinator);
     RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({}, owners())));

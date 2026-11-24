@@ -80,7 +80,7 @@ LifecycleInputs v4l2_compiling_coordinator() {
     auto registry = std::make_shared<recovery::CapabilityRegistryContents>();
     in.policy = {2, recovery::canonical_digest(*policy), policy};
     in.registry = {3, recovery::canonical_digest(*registry), registry};
-    RECOVERY_CHECK(in.coordinator->report_fault(f));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(*in.coordinator, f));
     RECOVERY_CHECK(recovery::test::succeeded(in.coordinator->begin_freeze({},
         {{1, recovery::ExecutorBindingStatus::RESOLVED,
           recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}})));
@@ -106,7 +106,7 @@ LifecycleInputs compiling_coordinator(recovery::RuntimeFailureProvider* provider
     auto registry = std::make_shared<recovery::CapabilityRegistryContents>();
     in.policy = {2, recovery::canonical_digest(*policy), policy};
     in.registry = {3, recovery::canonical_digest(*registry), registry};
-    RECOVERY_CHECK(in.coordinator->report_fault(f));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(*in.coordinator, f));
     RECOVERY_CHECK(recovery::test::succeeded(in.coordinator->begin_freeze({},
         {{1, recovery::ExecutorBindingStatus::RESOLVED,
           recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}})));
@@ -120,7 +120,7 @@ RECOVERY_TEST(runtime_failure_injection_before_initial_publish_fails_closed) {
     recovery::RecoveryCoordinator coordinator{11, nullptr, &failure};
     recovery::FaultReport f{recovery::FaultKind::PACKET_DOMAIN_FAULT,
                           {1, std::nullopt, std::nullopt}, {1,2,3,4}, {1,{}}};
-    RECOVERY_CHECK(!coordinator.report_fault(f));
+    RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(coordinator, f));
     RECOVERY_CHECK_EQ(coordinator.state(), recovery::RecoverySlotState::FAIL_CLOSED);
     RECOVERY_CHECK(!coordinator.has_active());
 }
@@ -131,9 +131,9 @@ RECOVERY_TEST(R137_runtime_failure_matrix_preserves_prepublication_state) {
     {
         ThrowAt failure{recovery::RuntimeFailureStage::REPORT_APPEND};
         recovery::RecoveryCoordinator c{11, nullptr, &failure};
-        RECOVERY_CHECK(c.report_fault(f));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, f));
         auto second = f; second.evidence.evidence_id = 2;
-        RECOVERY_CHECK(!c.report_fault(second));
+        RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(c, second));
         RECOVERY_CHECK_EQ(c.active().fault_batch.size(), 1U);
     }
     for (const auto stage : {recovery::RuntimeFailureStage::BEGIN_FREEZE_PREPARE,
@@ -141,7 +141,7 @@ RECOVERY_TEST(R137_runtime_failure_matrix_preserves_prepublication_state) {
                              recovery::RuntimeFailureStage::BEGIN_FREEZE_AFTER_DIGEST}) {
         ThrowAt failure{stage};
         recovery::RecoveryCoordinator c{11, nullptr, &failure};
-        RECOVERY_CHECK(c.report_fault(f));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, f));
         const std::vector<recovery::FrozenGrantRecord> ledger{
             {1, std::nullopt, {}, {}, {11, 0, 1}, 7, std::nullopt}};
         const std::vector<recovery::OwnerExecutorBinding> bindings{
@@ -156,7 +156,7 @@ RECOVERY_TEST(R137_runtime_failure_matrix_preserves_prepublication_state) {
         ThrowAt failure{recovery::RuntimeFailureStage::BEGIN_COMPILE_PUBLISH};
         failure.enabled = false;
         recovery::RecoveryCoordinator c{11, nullptr, &failure};
-        RECOVERY_CHECK(c.report_fault(f)); RECOVERY_CHECK(recovery::test::succeeded(c.begin_freeze({})));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, f)); RECOVERY_CHECK(recovery::test::succeeded(c.begin_freeze({})));
         RECOVERY_CHECK(c.commit_freeze());
         failure.enabled = true;
         RECOVERY_CHECK(!c.begin_compile());
@@ -192,7 +192,7 @@ RECOVERY_TEST(runtime_failure_injection_before_freeze_publication_leaves_no_snap
         recovery::RecoveryCoordinator coordinator{11, nullptr, &failure};
         recovery::FaultReport f{recovery::FaultKind::PACKET_DOMAIN_FAULT,
                               {1, std::nullopt, std::nullopt}, {1,2,3,4}, {1,{}}};
-        RECOVERY_CHECK(coordinator.report_fault(f));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, f));
         RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({},
             {{1, recovery::ExecutorBindingStatus::RESOLVED,
               recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}})));
@@ -210,7 +210,7 @@ RECOVERY_TEST(runtime_slot_has_single_optional_active_and_fail_closed_retains_it
     RECOVERY_CHECK(!coordinator.has_active());
     recovery::FaultReport f{recovery::FaultKind::PACKET_DOMAIN_FAULT,
                           {1, std::nullopt, std::nullopt}, {1,2,3,4}, {1,{}}};
-    RECOVERY_CHECK(coordinator.report_fault(f));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, f));
     RECOVERY_CHECK(coordinator.has_active());
     RECOVERY_CHECK(!coordinator.begin_compile());
     RECOVERY_CHECK_EQ(coordinator.state(), recovery::RecoverySlotState::FAIL_CLOSED);
@@ -260,7 +260,7 @@ RECOVERY_TEST(R14_new_scope_fault_after_seal_fails_closed) {
         in.coordinator->active().compiled_program));
     recovery::FaultReport expanded{recovery::FaultKind::RGA_DEVICE_FAULT,
         {2, std::nullopt, std::nullopt}, {1,2,3,4}, {2,{}}};
-    RECOVERY_CHECK(!in.coordinator->report_fault(expanded));
+    RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(*in.coordinator, expanded));
     RECOVERY_CHECK_EQ(in.coordinator->state(), recovery::RecoverySlotState::FAIL_CLOSED);
 }
 

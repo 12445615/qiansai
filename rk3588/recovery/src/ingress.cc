@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <concepts>
 #include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <type_traits>
 #include <utility>
@@ -101,6 +103,54 @@ private:
     std::size_t offset_{};
 };
 }  // namespace
+
+std::optional<LinuxBootId> parse_linux_boot_id(std::string_view text) noexcept {
+    if (!text.empty() && text.back() == '\n') text.remove_suffix(1);
+    if (text.size() != 36) return std::nullopt;
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    LinuxBootId id;
+    std::size_t out = 0;
+    for (std::size_t i = 0; i < text.size();) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (text[i] != '-') return std::nullopt;
+            ++i;
+            continue;
+        }
+        const int high = nibble(text[i]);
+        const int low = nibble(text[i + 1]);
+        if (high < 0 || low < 0) return std::nullopt;
+        id.bytes[out++] = static_cast<std::uint8_t>((high << 4) | low);
+        i += 2;
+    }
+    return id;
+}
+
+std::optional<LinuxBootId> read_linux_boot_id() noexcept {
+    const int fd = ::open("/proc/sys/kernel/random/boot_id", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return std::nullopt;
+    const OwnedFd owned{fd};
+    char buffer[64];
+    const ssize_t n = ::read(owned.get(), buffer, sizeof buffer);
+    if (n <= 0) return std::nullopt;
+    return parse_linux_boot_id(std::string_view{buffer, static_cast<std::size_t>(n)});
+}
+
+void canonical_write(CanonicalWriter& writer, const LinuxBootId& id) {
+    writer.write_bytes(id.bytes.data(), id.bytes.size());
+}
+
+void canonical_write(CanonicalWriter& writer, const DedupKey& key) {
+    canonical_write(writer, key.coordinator_boot.value);
+    canonical_write(writer, key.source.linux_boot);
+    canonical_write(writer, key.source.registration.value);
+    canonical_write(writer, key.source.process);
+    canonical_write(writer, key.delivery.value);
+}
 
 std::vector<std::uint8_t> encode_fault_frame(const FaultFrame& frame) {
     CanonicalWriter writer;

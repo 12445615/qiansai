@@ -243,7 +243,7 @@ void RecoveryCoordinator::fail_closed_locked(const char* reason) noexcept {
     slot_.state = RecoverySlotState::FAIL_CLOSED;
 }
 
-bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
+FaultReportResult RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
     const auto guard = RECOVERY_LOCK(REPORT_LOCK, "report_fault lock failed");
     {
         try {
@@ -257,11 +257,11 @@ bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
             || slot_.state == RecoverySlotState::PREPARING
             || slot_.state == RecoverySlotState::FREEZING;
         if (accepting && slot_.fault_seq_counter == kSequenceMax) {
-            fail_closed_locked("fault seq exhausted"); return false;
+            fail_closed_locked("fault seq exhausted"); return FaultReportResult::FAIL_CLOSED;
         }
         if (slot_.state == RecoverySlotState::IDLE) {
             if (slot_.recovery_seq == kSequenceMax) {
-                fail_closed_locked("recovery seq exhausted"); return false;
+                fail_closed_locked("recovery seq exhausted"); return FaultReportResult::FAIL_CLOSED;
             }
 #ifdef RECOVERY_TESTING
             checkpoint(RuntimeFailureStage::REPORT_PREPARE);
@@ -275,12 +275,12 @@ bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
             slot_.fault_seq_counter = next_fault_sequence;
             slot_.recovery_seq = next_sequence;
             slot_.state = RecoverySlotState::PREPARING;
-            return true;
+            return FaultReportResult::ACCEPTED;
         }
         if (slot_.state == RecoverySlotState::PREPARING
             || slot_.state == RecoverySlotState::FREEZING) {
             if (!slot_.active) {
-                fail_closed_locked("active runtime missing"); return false;
+                fail_closed_locked("active runtime missing"); return FaultReportResult::FAIL_CLOSED;
             }
 #ifdef RECOVERY_TESTING
             checkpoint(RuntimeFailureStage::REPORT_APPEND);
@@ -289,13 +289,18 @@ bool RecoveryCoordinator::report_fault(const FaultReport& report) noexcept {
             auto prepared = make_fact(next_fault_sequence);
             slot_.active->fault_batch.push_back(std::move(prepared));
             slot_.fault_seq_counter = next_fault_sequence;
-            return true;
+            return FaultReportResult::ACCEPTED;
         }
-        if (slot_.state == RecoverySlotState::FAIL_CLOSED) return false;
+        if (slot_.state == RecoverySlotState::FAIL_CLOSED) return FaultReportResult::FAIL_CLOSED;
         fail_closed_locked("fault after batch close");
         } catch (...) { fail_closed_locked("fault allocation failed"); }
     }
-    return false;
+    return FaultReportResult::FAIL_CLOSED;
+}
+
+void RecoveryCoordinator::fail_closed_from_ingress(IngressFailureCode) noexcept {
+    const auto guard = RECOVERY_LOCK(REPORT_LOCK, "fail_closed_from_ingress lock failed");
+    if (slot_.state != RecoverySlotState::FAIL_CLOSED) fail_closed_locked("ingress failed");
 }
 
 std::optional<RecoveryCoordinator::PreparedFaultBatchClose>

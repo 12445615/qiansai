@@ -30,6 +30,8 @@ struct RecoveryTestAccess {
     static void set_fault_batch(RecoveryCoordinator&, std::vector<FaultFact>);
     static void set_fault_seq_counter(RecoveryCoordinator&, std::uint64_t);
     static std::uint64_t fault_seq_counter(const RecoveryCoordinator&);
+    // report_fault is private (G11); tests reach it only here. True = ACCEPTED.
+    static bool report_fault(RecoveryCoordinator&, const FaultReport&);
     static FreezeSeq freeze_seq(const RecoveryCoordinator&);
     static void set_freeze_seq(RecoveryCoordinator&, FreezeSeq);
     static FaultIngressSession make_fault_session(

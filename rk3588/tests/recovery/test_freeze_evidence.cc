@@ -66,7 +66,7 @@ recovery::PolicySnapshot packet_policy() {
 RECOVERY_TEST(R165_first_fault_is_one_and_cutoff_bounds_the_batch) {
     recovery::RecoveryCoordinator c{7};
     RECOVERY_CHECK_EQ(Access::fault_seq_counter(c), 0U);
-    RECOVERY_CHECK(c.report_fault(report()));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, report()));
     RECOVERY_CHECK(recovery::test::succeeded(c.begin_freeze({})));
     RECOVERY_CHECK(c.commit_freeze());
     const auto& snapshot = *c.active().current_snapshot;
@@ -75,7 +75,7 @@ RECOVERY_TEST(R165_first_fault_is_one_and_cutoff_bounds_the_batch) {
     RECOVERY_CHECK_EQ(snapshot.fault_batch_cutoff, 1U);
 
     recovery::RecoveryCoordinator three{7};
-    for (std::uint64_t e = 1; e <= 3; ++e) RECOVERY_CHECK(three.report_fault(report(e)));
+    for (std::uint64_t e = 1; e <= 3; ++e) RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(three, report(e)));
     RECOVERY_CHECK(recovery::test::succeeded(three.begin_freeze({})));
     RECOVERY_CHECK(three.commit_freeze());
     const auto& frozen = *three.active().current_snapshot;
@@ -87,7 +87,7 @@ RECOVERY_TEST(R165_first_fault_is_one_and_cutoff_bounds_the_batch) {
 // ⑤ SEALED: a byte-identical report still fails closed; the frozen triple is unchanged.
 RECOVERY_TEST(R165_identical_report_after_seal_fails_closed_with_snapshot_unchanged) {
     recovery::RecoveryCoordinator c{7};
-    RECOVERY_CHECK(c.report_fault(report()));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, report()));
     RECOVERY_CHECK(recovery::test::succeeded(c.begin_freeze({},
         {{42, recovery::ExecutorBindingStatus::RESOLVED,
           recovery::ExecutorPrincipal{recovery::ProcessPrincipal{{99, 100}}}, 1}})));
@@ -102,7 +102,7 @@ RECOVERY_TEST(R165_identical_report_after_seal_fails_closed_with_snapshot_unchan
     RECOVERY_CHECK(c.seal_validated_program(c.active().compiled_program));
     RECOVERY_CHECK_EQ(c.state(), RecoverySlotState::SEALED);
     const auto before = *c.active().current_snapshot;
-    RECOVERY_CHECK(!c.report_fault(report()));
+    RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(c, report()));
     RECOVERY_CHECK_EQ(c.state(), RecoverySlotState::FAIL_CLOSED);
     const auto& after = *c.active().current_snapshot;
     RECOVERY_CHECK_EQ(after.fault_batch, before.fault_batch);
@@ -113,7 +113,7 @@ RECOVERY_TEST(R165_identical_report_after_seal_fails_closed_with_snapshot_unchan
 // ⑦f(b) one identity carried by two different facts is malformed: no snapshot.
 RECOVERY_TEST(R165_same_identity_different_content_fails_closed) {
     recovery::RecoveryCoordinator c{7};
-    RECOVERY_CHECK(c.report_fault(report()));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, report()));
     const auto first = Access::make_fault(7, 1, report(1));
     const auto other = Access::make_fault(7, 1, report(2));
     Access::set_fault_batch(c, {first, other});
@@ -129,10 +129,10 @@ RECOVERY_TEST(R165_fault_sequence_exhaustion_fails_closed_without_writes) {
     constexpr auto kMax = std::numeric_limits<std::uint64_t>::max();
     {   // appending while PREPARING
         recovery::RecoveryCoordinator c{7};
-        RECOVERY_CHECK(c.report_fault(report()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, report()));
         Access::set_fault_seq_counter(c, kMax);
         const auto batch = c.active().fault_batch;
-        RECOVERY_CHECK(!c.report_fault(report(2)));
+        RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(c, report(2)));
         RECOVERY_CHECK_EQ(c.state(), RecoverySlotState::FAIL_CLOSED);
         RECOVERY_CHECK_EQ(c.active().fault_batch, batch);
         RECOVERY_CHECK_EQ(Access::fault_seq_counter(c), kMax);
@@ -140,7 +140,7 @@ RECOVERY_TEST(R165_fault_sequence_exhaustion_fails_closed_without_writes) {
     {   // the first fault of a new recovery
         recovery::RecoveryCoordinator c{7};
         Access::set_fault_seq_counter(c, kMax);
-        RECOVERY_CHECK(!c.report_fault(report()));
+        RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(c, report()));
         RECOVERY_CHECK_EQ(c.state(), RecoverySlotState::FAIL_CLOSED);
         RECOVERY_CHECK(!c.has_active());
         RECOVERY_CHECK_EQ(Access::fault_seq_counter(c), kMax);
@@ -148,7 +148,7 @@ RECOVERY_TEST(R165_fault_sequence_exhaustion_fails_closed_without_writes) {
     {   // recovery sequence exhaustion on the first fault
         recovery::RecoveryCoordinator c{7};
         Access::set_recovery_seq(c, kMax);
-        RECOVERY_CHECK(!c.report_fault(report()));
+        RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(c, report()));
         RECOVERY_CHECK_EQ(c.state(), RecoverySlotState::FAIL_CLOSED);
         RECOVERY_CHECK(!c.has_active());
         RECOVERY_CHECK_EQ(Access::fault_seq_counter(c), 0U);
@@ -161,10 +161,10 @@ RECOVERY_TEST(R165_R137_non_allocation_exceptions_fail_closed_without_writes) {
     {
         RuntimeErrorAt failure{RuntimeFailureStage::REPORT_APPEND};
         recovery::RecoveryCoordinator c{7, nullptr, &failure};
-        RECOVERY_CHECK(c.report_fault(report()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, report()));
         const auto batch = c.active().fault_batch;
         const auto counter = Access::fault_seq_counter(c);
-        RECOVERY_CHECK(!c.report_fault(report(2)));
+        RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(c, report(2)));
         RECOVERY_CHECK_EQ(c.state(), RecoverySlotState::FAIL_CLOSED);
         RECOVERY_CHECK_EQ(c.active().fault_batch, batch);
         RECOVERY_CHECK_EQ(Access::fault_seq_counter(c), counter);
@@ -174,7 +174,7 @@ RECOVERY_TEST(R165_R137_non_allocation_exceptions_fail_closed_without_writes) {
                              RuntimeFailureStage::FREEZE_SNAPSHOT_DIGEST}) {
         RuntimeErrorAt failure{stage};
         recovery::RecoveryCoordinator c{7, nullptr, &failure};
-        RECOVERY_CHECK(c.report_fault(report()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, report()));
         const auto batch = c.active().fault_batch;
         const auto counter = Access::fault_seq_counter(c);
         RECOVERY_CHECK(recovery::test::succeeded(c.begin_freeze({})));
@@ -187,7 +187,7 @@ RECOVERY_TEST(R165_R137_non_allocation_exceptions_fail_closed_without_writes) {
 RECOVERY_TEST(R165_R137_prefix_digest_mismatch_and_missing_ack_publish_nothing) {
     {
         recovery::RecoveryCoordinator c{7};
-        RECOVERY_CHECK(c.report_fault(report()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, report()));
         const auto batch = c.active().fault_batch;
         const auto counter = Access::fault_seq_counter(c);
         RECOVERY_CHECK(recovery::test::succeeded(c.begin_freeze({})));
@@ -200,7 +200,7 @@ RECOVERY_TEST(R165_R137_prefix_digest_mismatch_and_missing_ack_publish_nothing) 
         external.source_executor_principal = recovery::ProcessPrincipal{{99, 1}};
         external.provenance = recovery::GrantProvenance::AUTHENTICATED_EXECUTOR;
         recovery::RecoveryCoordinator c{7};
-        RECOVERY_CHECK(c.report_fault(report()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, report()));
         const auto batch = c.active().fault_batch;
         const auto counter = Access::fault_seq_counter(c);
         RECOVERY_CHECK(recovery::test::succeeded(c.begin_freeze({external})));
@@ -233,7 +233,7 @@ RECOVERY_TEST(R163_recommit_after_publication_changes_nothing) {
     RECOVERY_CHECK(::pipe(pipefd) == 0);
     CountingKernel kernel{pipefd[0]};
     recovery::RecoveryCoordinator c{9, &kernel};
-    RECOVERY_CHECK(c.report_fault({recovery::FaultKind::WORKER_PROCESS_EXIT,
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, {recovery::FaultKind::WORKER_PROCESS_EXIT,
                                    {42, std::nullopt, recovery::ProcessIdentity{44, 123}},
                                    {1, 2, 3, 4}, {1, {}}}));
     RECOVERY_CHECK(recovery::test::succeeded(c.begin_freeze({})));

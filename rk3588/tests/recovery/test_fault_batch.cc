@@ -17,9 +17,9 @@ std::vector<recovery::OwnerExecutorBinding> owners() {
 RECOVERY_TEST(R11_report_fault_and_commit_freeze_are_mutex_linearized) {
     for (unsigned round = 0; round < 100; ++round) {
         recovery::RecoveryCoordinator coordinator{7};
-        RECOVERY_CHECK(coordinator.report_fault(fault(1)));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, fault(1)));
         RECOVERY_CHECK(recovery::test::succeeded(coordinator.begin_freeze({}, owners())));
-        std::thread reporter([&] { (void)coordinator.report_fault(fault(2)); });
+        std::thread reporter([&] { (void)recovery::RecoveryTestAccess::report_fault(coordinator, fault(2)); });
         std::thread committer([&] { (void)coordinator.commit_freeze(); });
         reporter.join(); committer.join();
         if (coordinator.state() == recovery::RecoverySlotState::FROZEN) {
@@ -39,9 +39,9 @@ RECOVERY_TEST(R11_report_fault_and_commit_freeze_are_mutex_linearized) {
 
 RECOVERY_TEST(R10_R14_fault_batch_is_canonical_and_closed) {
     recovery::RecoveryCoordinator coordinator{7};
-    RECOVERY_CHECK(coordinator.report_fault(fault(3)));
-    RECOVERY_CHECK(coordinator.report_fault(fault(1)));
-    RECOVERY_CHECK(coordinator.report_fault(fault(3)));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, fault(3)));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, fault(1)));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(coordinator, fault(3)));
     RECOVERY_CHECK_EQ(coordinator.state(), recovery::RecoverySlotState::PREPARING);
     RECOVERY_CHECK_EQ(coordinator.active().fault_batch.size(), 3U);
     RECOVERY_CHECK_EQ(coordinator.active().fault_batch[0].id.fault_seq, 1U);
@@ -54,6 +54,6 @@ RECOVERY_TEST(R10_R14_fault_batch_is_canonical_and_closed) {
     RECOVERY_CHECK_EQ(coordinator.active().current_snapshot->fault_batch_cutoff, 3U);
     RECOVERY_CHECK_EQ(coordinator.active().current_snapshot->fault_batch_digest,
                       recovery::canonical_digest(coordinator.active().fault_batch));
-    RECOVERY_CHECK(!coordinator.report_fault(fault(4)));
+    RECOVERY_CHECK(!recovery::RecoveryTestAccess::report_fault(coordinator, fault(4)));
     RECOVERY_CHECK_EQ(coordinator.state(), recovery::RecoverySlotState::FAIL_CLOSED);
 }

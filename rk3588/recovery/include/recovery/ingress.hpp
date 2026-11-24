@@ -4,6 +4,7 @@
 // Task 4I: TrustedFaultIngress session reader (§4.6, §14). Types follow the
 // frozen design verbatim; only the slice exercised by G1 exists so far.
 
+#include "recovery/canonical.hpp"
 #include "recovery/runtime.hpp"
 
 #include <array>
@@ -12,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -21,10 +23,25 @@ namespace recovery {
 struct RecoveryTestAccess;
 #endif
 
+// Three boot scopes, three strong types that never convert into one another
+// or into an integer (G19).
 struct LinuxBootId final {
-    std::array<std::uint8_t, 16> value{};                  // full 128-bit boot UUID (G19)
+    std::array<std::uint8_t, 16> bytes{};                  // full 128-bit UUID, never truncated
     auto operator<=>(const LinuxBootId&) const = default;
 };
+struct CoordinatorBootId final {
+    std::uint64_t value{};
+    auto operator<=>(const CoordinatorBootId&) const = default;
+};
+struct StoreDomainId final {
+    Digest value{};
+    auto operator<=>(const StoreDomainId&) const = default;
+};
+// Parses the 36-character 8-4-4-4-12 form of /proc/sys/kernel/random/boot_id
+// (one trailing newline allowed). Anything else is rejected.
+[[nodiscard]] std::optional<LinuxBootId> parse_linux_boot_id(std::string_view text) noexcept;
+// Reads and parses /proc/sys/kernel/random/boot_id.
+[[nodiscard]] std::optional<LinuxBootId> read_linux_boot_id() noexcept;
 struct FaultDeliveryId final {
     Digest value{};
     auto operator<=>(const FaultDeliveryId&) const = default;
@@ -39,13 +56,22 @@ struct AuthenticatedSourceInstance final {
     ProcessIdentity process;
     auto operator<=>(const AuthenticatedSourceInstance&) const = default;
 };
+// Dedup scope: no connection, raw fd or pidfd value takes part (G2, G15).
+struct DedupKey final {
+    CoordinatorBootId coordinator_boot;
+    AuthenticatedSourceInstance source;
+    FaultDeliveryId delivery;
+    auto operator<=>(const DedupKey&) const = default;
+};
+// The persisted form: LinuxBootId is exactly its 16 bytes, no length prefix.
+void canonical_write(CanonicalWriter&, const LinuxBootId&);
+void canonical_write(CanonicalWriter&, const DedupKey&);
 
 struct FaultFrame final {
     std::uint32_t wire_version{};
     FaultDeliveryId delivery_id;
     FaultReport report;
     std::vector<std::uint8_t> authenticated_metadata;
-    bool operator==(const FaultFrame&) const = default;
 };
 
 // One SOCK_SEQPACKET packet carries exactly one frame. The design fixes the
@@ -162,6 +188,9 @@ public:
 
 class TrustedFaultIngress final {
 public:
+    // The single handler entry: takes the session by value (§4.6.1). Its body
+    // lands with the S3 ingress slice; nothing calls it before then.
+    SessionTerminalResult handle_session(FaultIngressSession) noexcept;
     TrustedFaultIngress(const TrustedFaultIngress&) = delete;
     TrustedFaultIngress& operator=(const TrustedFaultIngress&) = delete;
 private:

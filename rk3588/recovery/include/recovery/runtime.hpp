@@ -44,6 +44,16 @@ public:
 };
 #endif
 
+enum class IngressFailureCode : std::uint8_t {
+    PAYLOAD_CONFLICT, STORE_INVALID, STORE_IO_FAILED, STORE_DEADLINE_EXPIRED,
+    SOURCE_REGISTRY_UNAVAILABLE, AUTHORITY_UNAVAILABLE, ALLOCATION_FAILED,
+    PREPARED_RECOVERED, COORDINATOR_REJECTED, OWNER_DEADLINE_EXPIRED,
+    OWNER_ABANDONED, GENERATION_EXHAUSTED, LOCK_FAILURE, SHUTDOWN_DEADLINE,
+    MISSING_EXPLICIT_SHUTDOWN, INTERNAL_FAILURE
+};
+enum class FaultReportResult : std::uint8_t { ACCEPTED, FAIL_CLOSED };
+class TrustedFaultIngress;
+
 enum class RecoverySlotState : std::uint32_t {
     IDLE, PREPARING, FREEZING, FROZEN, COMPILING, SEALED, QUIESCING,
     EXECUTING, COMMITTING, REOPENING, FAIL_CLOSED
@@ -176,7 +186,6 @@ public:
 #ifdef RECOVERY_TESTING
     RecoveryCoordinator(BootId, ProcessExitKernel*, RuntimeFailureProvider*);
 #endif
-    [[nodiscard]] bool report_fault(const FaultReport&) noexcept;
     [[nodiscard]] BeginFreezeResult begin_freeze(
         const std::vector<FrozenGrantRecord>&,
         const std::vector<OwnerExecutorBinding>& = {}) noexcept;
@@ -193,6 +202,11 @@ public:
     [[nodiscard]] bool has_active() const noexcept { return slot_.active.has_value(); }
     [[nodiscard]] const RecoveryInstanceRuntime& active() const { return *slot_.active; }
 private:
+    // Fault intake is private: production reaches it only through
+    // TrustedFaultIngress, tests only through the RECOVERY_TESTING seam (G11).
+    friend class TrustedFaultIngress;
+    [[nodiscard]] FaultReportResult report_fault(const FaultReport&) noexcept;
+    void fail_closed_from_ingress(IngressFailureCode) noexcept;
 #ifdef RECOVERY_TESTING
     friend class RecoveryRuntimeTestAccess;
     friend struct RecoveryTestAccess;

@@ -71,7 +71,7 @@ std::unique_ptr<recovery::RecoveryCoordinator> freezing(
     const std::vector<recovery::FrozenGrantRecord>& prefix,
     recovery::RuntimeFailureProvider* provider = nullptr) {
     auto c = std::make_unique<recovery::RecoveryCoordinator>(7, nullptr, provider);
-    RECOVERY_CHECK(c->report_fault(fault()));
+    RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(*c, fault()));
     RECOVERY_CHECK(recovery::test::succeeded(c->begin_freeze(prefix)));
     return c;
 }
@@ -121,7 +121,7 @@ RECOVERY_TEST(R168_begin_freeze_derives_required_owners_and_synthesizes_internal
 RECOVERY_TEST(R168_rejected_acks_return_exact_codes_and_write_nothing) {
     {
         recovery::RecoveryCoordinator preparing{7};
-        RECOVERY_CHECK(preparing.report_fault(fault()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(preparing, fault()));
         const auto ctx = Access::issue_test_context(kOwnerProcess);
         const recovery::OwnerSnapshotAck ack{preparing.active().recovery_id, 1, 7, 0, kExternal,
                                              {{7, 0, 1}}, {}, {}};
@@ -217,7 +217,7 @@ RECOVERY_TEST(R168_invalid_owner_binding_fails_begin_freeze_closed) {
         {external_grant(1), external_grant(2, recovery::GrantState::AUTHORIZED, kOtherProcess)}};
     for (const auto& prefix : prefixes) {
         recovery::RecoveryCoordinator c{7};
-        RECOVERY_CHECK(c.report_fault(fault()));
+        RECOVERY_CHECK(recovery::RecoveryTestAccess::report_fault(c, fault()));
         const auto result = c.begin_freeze(prefix);
         const auto* error = std::get_if<recovery::BeginFreezeError>(&result);
         RECOVERY_CHECK(error != nullptr);
